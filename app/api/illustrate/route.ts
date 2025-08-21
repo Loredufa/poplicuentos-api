@@ -1,11 +1,13 @@
-// app/api/illustrate/route.ts — Edge aggregator, sin cambiar la app
+// app/api/illustrate/route.ts — Edge aggregator (sin "any")
 import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'edge';
 
 type Scene = 'intro' | 'conflict' | 'ending';
 
 const ALLOW = (process.env.ORIGIN_ALLOWLIST ?? '*')
-  .split(',').map(s => s.trim()).filter(Boolean);
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 function cors(origin: string | null) {
   const allowed = ALLOW.includes('*') || (origin && ALLOW.includes(origin));
@@ -21,99 +23,106 @@ export async function OPTIONS(req: NextRequest) {
   return new NextResponse(null, { headers: cors(req.headers.get('origin')) });
 }
 
+// ----- Helpers tipados
+type OneImageResponse = { image?: string; scene?: Scene };
+
+function makeOneUrl(base: string, scene: Scene) {
+  return `${base}/api/illustrate-one?scene=${scene}`;
+}
+
+async function fetchScene(url: string, bodyText: string, scene: Scene): Promise<{ scene: Scene; url: string }> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: bodyText,
+  });
+
+  const ct = res.headers.get('content-type') || '';
+  if (!res.ok) {
+    const detail = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
+    throw new Error(`SCENE ${scene} ${res.status}: ${detail.slice(0, 800)}`);
+  }
+
+  const json = (await res.json()) as OneImageResponse;
+  const urlImg = json?.image;
+  if (typeof urlImg !== 'string') throw new Error(`SCENE ${scene}: invalid payload`);
+  return { scene, url: urlImg };
+}
+
+type RaceOutcome<T> =
+  | { type: 'value'; index: number; value: T }
+  | { type: 'error'; index: number; error: unknown }
+  | { type: 'timeout' };
+
+async function raceWithTimeout<T>(promises: Promise<T>[], ms: number): Promise<RaceOutcome<T>> {
+  const indexed = promises.map((p, i) =>
+    p.then((value) => ({ type: 'value' as const, index: i, value }))
+      .catch((error) => ({ type: 'error' as const, index: i, error }))
+  );
+  const timeout = new Promise<RaceOutcome<T>>((resolve) =>
+    setTimeout(() => resolve({ type: 'timeout' }), ms)
+  );
+  return Promise.race([...indexed, timeout]);
+}
+
 export async function POST(req: NextRequest) {
   const origin = req.headers.get('origin');
   const headers = { 'Content-Type': 'application/json', ...cors(origin) };
 
-  // Leemos el body una sola vez y lo reusamos
+  // Leemos el body como texto una sola vez y lo reutilizamos
   let bodyText = '';
-  try { bodyText = await req.text(); }
-  catch { return NextResponse.json({ error: 'Invalid body' }, { status: 400, headers }); }
+  try {
+    bodyText = await req.text();
+    // validación mínima: debe ser JSON
+    JSON.parse(bodyText);
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers });
+  }
 
-  // URL pública del mismo deployment (evita CORS)
   const base = new URL(req.url).origin;
-
-  // Construye la URL del micro-endpoint de 1 imagen
-  const makeUrl = (scene: Scene) => `${base}/api/illustrate-one?scene=${scene}`;
-
-  // Disparamos 3 requests en paralelo
   const scenes: Scene[] = ['intro', 'conflict', 'ending'];
-
-  // Helper: una promesa etiquetada para poder "racear" y recolectar
-  const tagged = (p: Promise<Response>, tag: Scene) =>
-    p.then(async (res) => {
-       if (!res.ok) {
-         const ct = res.headers.get('content-type') || '';
-         const err = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
-         throw new Error(`SCENE ${tag} ${res.status}: ${err.slice(0, 800)}`);
-       }
-       const j = await res.json();
-       const url: unknown = j?.image;
-       if (typeof url !== 'string') throw new Error(`SCENE ${tag}: invalid payload`);
-       return { scene: tag, url };
-    });
-
-  // Lanzamos los fetch en paralelo
-  const pending: Array<Promise<{ scene: Scene; url: string }>> = scenes.map((scene) =>
-    tagged(fetch(makeUrl(scene), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: bodyText,          // reusamos el body original
-    }), scene)
+  let pending: Array<Promise<{ scene: Scene; url: string }>> = scenes.map((scene) =>
+    fetchScene(makeOneUrl(base, scene), bodyText, scene)
   );
 
   const images: string[] = [];
   const errors: string[] = [];
-  const deadline = Date.now() + 23_000; // Edge exige respuesta inicial <~25s
 
-  // Vamos resolviendo a medida que llegan: devolvemos cuando haya 2 o cuando se agote el tiempo
+  const deadline = Date.now() + 23_000; // Edge necesita respuesta inicial <~25s
+
+  // Vamos recolectando resultados hasta tener 2 imágenes o hasta el deadline
   while (pending.length && Date.now() < deadline && images.length < 2) {
-    // Carrera entre las promesas que quedan
-    const race = Promise.race(
-      pending.map((p, i) =>
-        p.then((v) => ({ ok: true as const, i, v }))
-         .catch((e: unknown) => ({ ok: false as const, i, e }))
-      )
-    );
+    const msLeft = Math.max(0, deadline - Date.now());
+    const outcome = await raceWithTimeout(pending, msLeft);
 
-    // Además, cortamos si se pasó el tiempo
-    const left = Math.max(0, deadline - Date.now());
-    const timed = Promise.race([
-      race,
-      new Promise<{ timeout: true }>((r) => setTimeout(() => r({ timeout: true }), left)),
-    ]);
+    if (outcome.type === 'timeout') break;
 
-    const outcome = await timed;
+    // quitamos del array la promesa ganadora (o la que falló)
+    const removed = pending.splice(outcome.index, 1)[0];
+    // evitamos "unhandled" (ya resuelta/rechazada)
+    try { await removed; } catch {}
 
-    if ((outcome as any)?.timeout) break;
-
-    const { ok, i } = outcome as { ok: boolean; i: number; v?: any; e?: unknown };
-    const winner = pending.splice(i, 1)[0]; // retiramos la promesa ya resuelta
-    try { await winner; } catch {}
-
-    if (ok) {
-      const { v } = outcome as { ok: true; i: number; v: { scene: Scene; url: string } };
-      images.push(v.url);
-    } else {
-      const { e } = outcome as { ok: false; i: number; e: unknown };
-      errors.push(String((e as Error)?.message || e));
+    if (outcome.type === 'value') {
+      images.push(outcome.value.url);
+    } else if (outcome.type === 'error') {
+      const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
+      errors.push(msg);
     }
   }
 
-  // Si aún queda tiempo, vemos si alguna otra terminó mientras tanto
-  const leftovers = await Promise.allSettled(pending);
-  for (const r of leftovers) {
+  // Recolectamos lo que haya terminado después del último race
+  const rest = await Promise.allSettled(pending);
+  for (const r of rest) {
     if (r.status === 'fulfilled') images.push(r.value.url);
-    else errors.push(String((r.reason as Error)?.message || r.reason));
+    else errors.push(r.reason instanceof Error ? r.reason.message : String(r.reason));
   }
 
   if (!images.length) {
     return NextResponse.json(
       { error: 'Upstream error', details: errors[0] || 'No image generated' },
-      { status: 502, headers },
+      { status: 502, headers }
     );
   }
 
-  // Devolvemos 1–3 imágenes (la APK ya soporta longitud variable)
   return NextResponse.json({ images: images.slice(0, 3) }, { status: 200, headers });
 }
