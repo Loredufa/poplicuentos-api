@@ -1,29 +1,14 @@
-// app/api/illustrate/route.ts — Edge, rápido y tolerante a timeouts
+// app/api/illustrate/route.ts — Edge aggregator, sin cambiar la app
 import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'edge';
 
-type AgeRange = '2-5' | '6-10';
-type Tone = 'tierno' | 'aventurero' | 'humor';
-type Locale = 'es-AR' | 'es-LATAM';
+type Scene = 'intro' | 'conflict' | 'ending';
 
-interface IllustrateRequest {
-  age_range: AgeRange;
-  theme?: string;
-  skill?: string;
-  characters?: string;
-  tone?: Tone;
-  locale?: Locale;
-  story?: string;
-}
-
-interface OpenAIImageData { url?: string }
-interface OpenAIImageResponse { data?: OpenAIImageData[] }
-
-const ALLOWLIST = (process.env.ORIGIN_ALLOWLIST ?? '*')
+const ALLOW = (process.env.ORIGIN_ALLOWLIST ?? '*')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 function cors(origin: string | null) {
-  const allowed = ALLOWLIST.includes('*') || (origin && ALLOWLIST.includes(origin));
+  const allowed = ALLOW.includes('*') || (origin && ALLOW.includes(origin));
   return {
     'Access-Control-Allow-Origin': allowed ? (origin ?? '*') : 'null',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -36,118 +21,99 @@ export async function OPTIONS(req: NextRequest) {
   return new NextResponse(null, { headers: cors(req.headers.get('origin')) });
 }
 
-function isBody(u: unknown): u is IllustrateRequest {
-  if (typeof u !== 'object' || u === null) return false;
-  const o = u as Record<string, unknown>;
-  const age = o.age_range;
-  if (age !== '2-5' && age !== '6-10') return false;
-  if (o.tone && !['tierno','aventurero','humor'].includes(String(o.tone))) return false;
-  if (o.locale && !['es-AR','es-LATAM'].includes(String(o.locale))) return false;
-  if (o.theme && typeof o.theme !== 'string') return false;
-  if (o.skill && typeof o.skill !== 'string') return false;
-  if (o.characters && typeof o.characters !== 'string') return false;
-  if (o.story && typeof o.story !== 'string') return false;
-  return true;
-}
-
-function buildPrompts(b: IllustrateRequest): string[] {
-  const baseStyle =
-    `ilustración infantil, libro de cuentos, colores suaves y cálidos, estilo acuarela/pastel, ` +
-    `trazos simples y expresivos, diversidad e inclusión, apto ${b.age_range === '2-5' ? 'preescolar' : 'primaria'}, ` +
-    `luz nocturna suave, sin violencia, sin marcas reales.`;
-  const who = b.characters ? `con ${b.characters}` : 'con los personajes del cuento';
-  const brief = b.story
-    ? `Basado en este cuento: ${b.story.slice(0, 900)}`
-    : `Tema: ${b.theme ?? 'cuento infantil'}. Habilidad: ${b.skill ?? 'empatía'}. Tono: ${b.tone ?? 'tierno'}.`;
-  return [
-    `ESCENA 1 (inicio): ${who}. Presentación del mundo cotidiano. ${brief}. ${baseStyle}`,
-    `ESCENA 2 (desarrollo): conflicto leve y práctica de la habilidad socioemocional. ${who}. ${baseStyle}`,
-    `ESCENA 3 (cierre): resolución amable y atmósfera calma para dormir. ${who}. ${baseStyle}`,
-  ];
-}
-
-function firstUrl(resp: OpenAIImageResponse): string | null {
-  const arr = resp.data;
-  if (!Array.isArray(arr) || !arr.length) return null;
-  const url = arr[0]?.url;
-  return typeof url === 'string' ? url : null;
-}
-
-async function genImage(apiKey: string, prompt: string, signal: AbortSignal) {
-  // 1) intento con gpt-image-1
-  let r = await fetch('https://api.openai.com/v1/images/generations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: 'gpt-image-1', prompt, size: '512x512', n: 1 }),
-    signal,
-  });
-
-  // 2) fallback a dall-e-3 en errores típicos
-  if (!r.ok && [400,401,403,429].includes(r.status)) {
-    r = await fetch('https://api.openai.com/v1/images/generations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: 'dall-e-3', prompt, size: '512x512', n: 1 }),
-      signal,
-    });
-  }
-
-  const ct = r.headers.get('content-type') ?? '';
-  if (ct.includes('application/json')) {
-    const j = (await r.json()) as OpenAIImageResponse;
-    if (!r.ok) throw new Error(`OpenAI ${r.status}: ${JSON.stringify(j).slice(0, 1000)}`);
-    const url = firstUrl(j);
-    if (!url) throw new Error('No image URL');
-    return url;
-  } else {
-    const t = await r.text();
-    if (!r.ok) throw new Error(`OpenAI ${r.status}: ${t.slice(0, 1000)}`);
-    throw new Error('Unexpected non-JSON response');
-  }
-}
-
 export async function POST(req: NextRequest) {
   const origin = req.headers.get('origin');
   const headers = { 'Content-Type': 'application/json', ...cors(origin) };
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return NextResponse.json({ error: 'Missing OPENAI_API_KEY' }, { status: 500, headers });
+  // Leemos el body una sola vez y lo reusamos
+  let bodyText = '';
+  try { bodyText = await req.text(); }
+  catch { return NextResponse.json({ error: 'Invalid body' }, { status: 400, headers }); }
 
-  let parsed: unknown;
-  try { parsed = await req.json(); }
-  catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers }); }
-  if (!isBody(parsed)) return NextResponse.json({ error: 'Invalid body' }, { status: 400, headers });
+  // URL pública del mismo deployment (evita CORS)
+  const base = new URL(req.url).origin;
 
-  const prompts = buildPrompts(parsed);
+  // Construye la URL del micro-endpoint de 1 imagen
+  const makeUrl = (scene: Scene) => `${base}/api/illustrate-one?scene=${scene}`;
 
-  try {
-    // Timeout defensivo (22s) por llamado para no chocar el límite Edge (25s)
-    const withTimeout = <T,>(p: (signal: AbortSignal) => Promise<T>) =>
-      new Promise<T>((resolve, reject) => {
-        const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort('timeout'), 22_000);
-        p(ctrl.signal).then((v) => { clearTimeout(timer); resolve(v); })
-                      .catch((e) => { clearTimeout(timer); reject(e); });
-      });
+  // Disparamos 3 requests en paralelo
+  const scenes: Scene[] = ['intro', 'conflict', 'ending'];
 
-    const results = await Promise.allSettled(
-      prompts.map((p) => withTimeout<string>((signal) => genImage(apiKey, p, signal)))
+  // Helper: una promesa etiquetada para poder "racear" y recolectar
+  const tagged = (p: Promise<Response>, tag: Scene) =>
+    p.then(async (res) => {
+       if (!res.ok) {
+         const ct = res.headers.get('content-type') || '';
+         const err = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
+         throw new Error(`SCENE ${tag} ${res.status}: ${err.slice(0, 800)}`);
+       }
+       const j = await res.json();
+       const url: unknown = j?.image;
+       if (typeof url !== 'string') throw new Error(`SCENE ${tag}: invalid payload`);
+       return { scene: tag, url };
+    });
+
+  // Lanzamos los fetch en paralelo
+  const pending: Array<Promise<{ scene: Scene; url: string }>> = scenes.map((scene) =>
+    tagged(fetch(makeUrl(scene), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: bodyText,          // reusamos el body original
+    }), scene)
+  );
+
+  const images: string[] = [];
+  const errors: string[] = [];
+  const deadline = Date.now() + 23_000; // Edge exige respuesta inicial <~25s
+
+  // Vamos resolviendo a medida que llegan: devolvemos cuando haya 2 o cuando se agote el tiempo
+  while (pending.length && Date.now() < deadline && images.length < 2) {
+    // Carrera entre las promesas que quedan
+    const race = Promise.race(
+      pending.map((p, i) =>
+        p.then((v) => ({ ok: true as const, i, v }))
+         .catch((e: unknown) => ({ ok: false as const, i, e }))
+      )
     );
 
-    const images = results
-      .map((r) => (r.status === 'fulfilled' ? r.value : null))
-      .filter((u): u is string => typeof u === 'string');
+    // Además, cortamos si se pasó el tiempo
+    const left = Math.max(0, deadline - Date.now());
+    const timed = Promise.race([
+      race,
+      new Promise<{ timeout: true }>((r) => setTimeout(() => r({ timeout: true }), left)),
+    ]);
 
-    if (!images.length) {
-      // si nada llegó, informo el primer motivo que encontremos
-      const firstErr = results.find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
-      const detail = firstErr?.reason ? String(firstErr.reason) : 'No images generated';
-      return NextResponse.json({ error: 'Upstream error', details: detail }, { status: 502, headers });
+    const outcome = await timed;
+
+    if ((outcome as any)?.timeout) break;
+
+    const { ok, i } = outcome as { ok: boolean; i: number; v?: any; e?: unknown };
+    const winner = pending.splice(i, 1)[0]; // retiramos la promesa ya resuelta
+    try { await winner; } catch {}
+
+    if (ok) {
+      const { v } = outcome as { ok: true; i: number; v: { scene: Scene; url: string } };
+      images.push(v.url);
+    } else {
+      const { e } = outcome as { ok: false; i: number; e: unknown };
+      errors.push(String((e as Error)?.message || e));
     }
-
-    return NextResponse.json({ images }, { status: 200, headers });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: 'Upstream error', details: msg }, { status: 500, headers });
   }
+
+  // Si aún queda tiempo, vemos si alguna otra terminó mientras tanto
+  const leftovers = await Promise.allSettled(pending);
+  for (const r of leftovers) {
+    if (r.status === 'fulfilled') images.push(r.value.url);
+    else errors.push(String((r.reason as Error)?.message || r.reason));
+  }
+
+  if (!images.length) {
+    return NextResponse.json(
+      { error: 'Upstream error', details: errors[0] || 'No image generated' },
+      { status: 502, headers },
+    );
+  }
+
+  // Devolvemos 1–3 imágenes (la APK ya soporta longitud variable)
+  return NextResponse.json({ images: images.slice(0, 3) }, { status: 200, headers });
 }
