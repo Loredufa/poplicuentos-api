@@ -153,7 +153,7 @@ export async function POST(req: NextRequest) {
         {
           role: 'system',
           content:
-            'Eres Cuentero/A. Continúa EXACTAMENTE donde quedó el texto anterior, sin repetir. ' +
+            'Eres Poplicuentos. Continúa EXACTAMENTE donde quedó el texto anterior, sin repetir. ' +
             'Si el bloque JSON ya fue entregado, NO lo repitas; si no, inclúyelo al final.',
         },
         { role: 'assistant', content },
