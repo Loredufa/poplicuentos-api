@@ -59,7 +59,7 @@ function kidStylePrompt(story: string, age: AgeRange, tone: string) {
       ? 'Simple shapes, soft pastel colors, big clear characters, rounded forms.'
       : 'Richer scenes, expressive faces, dynamic composition but clean for kids.',
     `Tone: ${tone || 'tierno'}.`,
-    `Depict a single scene from this story (NO text in the image).`,
+    `It depicts three different scenes from this story, keeping the same characters (no text on the image).`,
     story.slice(0, 700),
     `Cute, warm light, cozy, safe for kids.`,
   ].join(' ');
