@@ -1,107 +1,122 @@
-// app/api/illustrate/route.ts — Edge aggregator sin "any", con timeouts
+// app/api/illustrate/route.ts
+export const runtime = 'nodejs';
+
 import { NextRequest, NextResponse } from 'next/server';
-export const runtime = 'edge';
 
-type Scene = 'intro' | 'conflict' | 'ending';
-
-interface OneImageResponse {
-  image?: string;
-  scene?: Scene;
+// Util: prompt “infantil” (clarito para 2-5 vs 6-10)
+function kidStylePrompt(story: string, age: '2-5'|'6-10', tone: string) {
+  return [
+    `Children's picture-book illustration for ages ${age}.`,
+    age === '2-5'
+      ? 'Simple shapes, soft pastel colors, big clear characters, rounded forms.'
+      : 'Richer scenes, expressive faces, dynamic composition but clean for kids.',
+    `Tone: ${tone || 'tierno'}.`,
+    `Depict a single scene from this story (NO text in the image):`,
+    story.slice(0, 700),
+    `Cute, warm light, cozy, safe for kids.`
+  ].join(' ');
 }
 
-const ALLOW = (process.env.ORIGIN_ALLOWLIST ?? '*')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
+// Hace un intento "sincrónico" (hasta 45s) y, si no termina, hace un poll cortito.
+async function replicateFluxSchnell({
+  prompt,
+  aspect_ratio = '1:1',
+  num_outputs = 3,
+  num_inference_steps = 4,
+}: {
+  prompt: string;
+  aspect_ratio?: '1:1'|'3:4'|'4:3'|'16:9'|'9:16';
+  num_outputs?: number;
+  num_inference_steps?: 1|2|3|4;
+}): Promise<string[]> {
+  const token = process.env.REPLICATE_API_TOKEN;
+  if (!token) throw new Error('Missing REPLICATE_API_TOKEN');
 
-function cors(origin: string | null) {
-  const allowed = ALLOW.includes('*') || (origin && ALLOW.includes(origin));
-  return {
-    'Access-Control-Allow-Origin': allowed ? (origin ?? '*') : 'null',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    Vary: 'Origin',
-  };
-}
+  // 1) Crear predicción pidiendo “esperar” hasta 45s (sync light)
+  const create = await fetch('https://api.replicate.com/v1/predictions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'wait=45', // espera hasta 45s; si no alcanza, luego hacemos poll
+    },
+    body: JSON.stringify({
+      // Para modelos "oficiales" se puede usar owner/name directo.
+      // Inputs del schema: prompt, aspect_ratio, num_outputs (1-4), num_inference_steps (1-4)
+      // https://replicate.com/black-forest-labs/flux-schnell/api
+      version: 'black-forest-labs/flux-schnell',
+      input: {
+        prompt,
+        aspect_ratio,
+        num_outputs: Math.min(Math.max(num_outputs, 1), 4),
+        num_inference_steps,
+        // opcionales se puede tunear:
+        // output_format: 'jpg',
+        // output_quality: 85,
+      },
+    }),
+  });
 
-export async function OPTIONS(req: NextRequest) {
-  return new NextResponse(null, { headers: cors(req.headers.get('origin')) });
-}
-
-function makeOneUrl(base: string, scene: Scene) {
-  return `${base}/api/illustrate-one?scene=${scene}`;
-}
-
-// Llama a /api/illustrate-one con timeout defensivo (22s). Devuelve la URL o lanza error.
-async function fetchOneWithTimeout(url: string, bodyText: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort('timeout'), 22_000);
-
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: bodyText,
-      signal: controller.signal,
-    });
-
-    const ct = res.headers.get('content-type') || '';
-    if (!res.ok) {
-      const detail = ct.includes('application/json') ? JSON.stringify(await res.json()) : await res.text();
-      throw new Error(`${res.status}: ${detail.slice(0, 800)}`);
-    }
-
-    const json = (await res.json()) as OneImageResponse;
-    if (typeof json?.image !== 'string') {
-      throw new Error('invalid payload (missing image url)');
-    }
-    return json.image;
-  } finally {
-    clearTimeout(timer);
+  if (!create.ok) {
+    const t = await create.text();
+    throw new Error(`Replicate create error ${create.status}: ${t}`);
   }
+
+  const first = await create.json();
+  if (first.status === 'succeeded' && Array.isArray(first.output) && first.output.length) {
+    return first.output as string[]; // array de URLs
+  }
+
+  // 2) Si no terminó, hacemos un poll corto (hasta ~20s)
+  const id = first.id as string;
+  const started = Date.now();
+  while (Date.now() - started < 20000) {
+    await new Promise(r => setTimeout(r, 1500));
+    const res = await fetch(`https://api.replicate.com/v1/predictions/${id}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`Replicate get error ${res.status}: ${t}`);
+    }
+    const p = await res.json();
+    if (p.status === 'succeeded' && Array.isArray(p.output) && p.output.length) {
+      return p.output as string[];
+    }
+    if (p.status === 'failed' || p.status === 'canceled') {
+      throw new Error(`Replicate status: ${p.status}`);
+    }
+  }
+
+  throw new Error('Timeout waiting for images');
 }
 
 export async function POST(req: NextRequest) {
-  const origin = req.headers.get('origin');
-  const headers = { 'Content-Type': 'application/json', ...cors(origin) };
-
-  // Leemos el body UNA vez y validamos que es JSON
-  let bodyText = '';
   try {
-    bodyText = await req.text();
-    JSON.parse(bodyText);
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400, headers });
-  }
+    const {
+      story,
+      age_range,
+      tone = 'tierno',
+      aspect_ratio = '1:1',
+      num_images = 3,
+    } = await req.json();
 
-  const base = new URL(req.url).origin;
-  const scenes: Scene[] = ['intro', 'conflict', 'ending'];
-
-  // Disparamos las 3 en paralelo (cada una con timeout interno de 22s)
-  const promises = scenes.map((scene) =>
-    fetchOneWithTimeout(makeOneUrl(base, scene), bodyText)
-  );
-
-  const settled = await Promise.allSettled(promises);
-
-  const images: string[] = [];
-  const errors: string[] = [];
-
-  for (const r of settled) {
-    if (r.status === 'fulfilled') {
-      images.push(r.value);
-    } else {
-      const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
-      errors.push(msg);
+    if (!story || !age_range) {
+      return NextResponse.json({ error: 'Missing story or age_range' }, { status: 400 });
     }
-  }
 
-  if (!images.length) {
-    return NextResponse.json(
-      { error: 'Upstream error', details: errors[0] || 'No image generated' },
-      { status: 502, headers }
-    );
-  }
+    const prompt = kidStylePrompt(story, age_range, tone);
+    const urls = await replicateFluxSchnell({
+      prompt,
+      aspect_ratio,
+      num_outputs: num_images,
+      num_inference_steps: 4,
+    });
 
-  return NextResponse.json({ images: images.slice(0, 3) }, { status: 200, headers });
+    // aseguramos exactamente 3 
+    const images = urls.slice(0, Math.min(num_images, 4));
+    return NextResponse.json({ provider: 'replicate', images }, { status: 200 });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message || 'Illustration failed' }, { status: 502 });
+  }
 }
