@@ -3,7 +3,7 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-// ---- Tipos del request/response
+// -------- Tipos --------
 type AgeRange = '2-5' | '6-10';
 type Tone = 'tierno' | 'aventurero' | 'humor' | string;
 type Locale = 'es-AR' | 'es-LATAM' | 'es-ES' | string;
@@ -12,34 +12,16 @@ interface StoryBody {
   age_range: AgeRange;
   theme?: string;
   skill?: string;
-  characters?: string;             // ej: "Luna (prota), Tito (amigo)"
-  tone?: Tone;                     // ej: "tierno"
-  locale?: Locale;                 // ej: "es-AR"
-  reading_time_minutes?: number;   // ej: 4
+  characters?: string;
+  tone?: Tone;
+  locale?: Locale;
+  reading_time_minutes?: number;
 }
 
-interface StoryResponse {
-  story: string;
-  meta: {
-    age_range: AgeRange;
-    theme?: string;
-    skill?: string;
-    tone: Tone;
-    locale: Locale;
-    reading_time_minutes: number;
-  };
-}
-
-// ---- Type guards
-function isAgeRange(x: unknown): x is AgeRange {
-  return x === '2-5' || x === '6-10';
-}
-function isString(x: unknown): x is string {
-  return typeof x === 'string' && x.length >= 0;
-}
-function isNumber(x: unknown): x is number {
-  return typeof x === 'number' && Number.isFinite(x);
-}
+// -------- Type guards (sin any) --------
+function isString(x: unknown): x is string { return typeof x === 'string'; }
+function isNumber(x: unknown): x is number { return typeof x === 'number' && Number.isFinite(x); }
+function isAgeRange(x: unknown): x is AgeRange { return x === '2-5' || x === '6-10'; }
 function isStoryBody(x: unknown): x is StoryBody {
   if (typeof x !== 'object' || x === null) return false;
   const r = x as Record<string, unknown>;
@@ -53,11 +35,11 @@ function isStoryBody(x: unknown): x is StoryBody {
   return true;
 }
 
-// ---- OpenAI
+// -------- OpenAI --------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
-// ---- Prompt helper
-function buildSystemPrompt(): string {
+// -------- Prompts --------
+function systemPrompt(): string {
   return [
      'Eres Poplicuentos, narrador infantil en español (es-AR / es-LATAM). ' +
     'Objetivo: crear un cuento original para niños con enfoque en habilidades socioemocionales. Para ser leido por un adulto' +
@@ -77,36 +59,42 @@ function buildSystemPrompt(): string {
   ].join(' ');
 }
 
-function buildUserPrompt(p: Required<Pick<StoryBody, 'age_range'>> & StoryBody): string {
+function userPrompt(p: Required<Pick<StoryBody, 'age_range'>> & StoryBody): string {
   const age = p.age_range;
   const tono = p.tone || 'tierno';
   const minutos = p.reading_time_minutes ?? 4;
+
   const meta: string[] = [];
   if (p.theme) meta.push(`tema: ${p.theme}`);
   if (p.skill) meta.push(`habilidad: ${p.skill}`);
   if (p.characters) meta.push(`personajes: ${p.characters}`);
 
-  // “Filosofía suave” para 6–10 (lo que pediste)
-  const filos = age === '6-10'
-    ? 'Integra “filosofía para niños” sutil: pequeñas preguntas sobre verdad/opinión, amistad/justicia o identidad/cambio dentro de la historia, sin nombrarlo explícitamente.'
-    : 'Mantén estructura muy simple, repetición suave y final de seguridad/cariño.';
+  const filosofiaSuave =
+    age === '6-10'
+      ? 'Integra “filosofía para niños” sutil (verdad/opinión, amistad/justicia o identidad/cambio) dentro de la historia, sin nombrarlo explícitamente.'
+      : 'Mantén estructura simple y reconfortante adecuada a preescolar.';
 
   return [
-    `Edad objetivo: ${age}. Tono: ${tono}. Duración: ~${minutos} min de lectura.`,
-    `Locale: ${p.locale || 'es-LATAM'}. ${filos}`,
-    meta.length ? `Metadatos: ${meta.join(' · ')}.` : '',
-    'Entrega SOLO el cuento listo para leer (incluye un TÍTULO en la primera línea).',
+    `Edad objetivo: ${age}. Tono: ${tono}. Duración aprox.: ${minutos} minutos de lectura.`,
+    `Locale: ${p.locale || 'es-LATAM'}. ${filosofiaSuave}`,
+    meta.length ? `Metadatos sugeridos: ${meta.join(' · ')}.` : '',
+    'Instrucciones de formato:',
+    '1) Primera línea: TÍTULO del cuento.',
+    '2) Párrafos con saltos de línea (sin listas).',
+    '3) Al FINAL agrega un bloque de metadatos con este formato EXACTO:',
+    '```json',
+    '{ "age_range":"2-5|6-10", "theme":"...", "skill":"...", "tone":"...", "locale":"...", "reading_time_minutes":4 }',
+    '```',
   ].join('\n');
 }
 
-// ---- Handler
+// -------- Handler --------
 export async function POST(req: NextRequest) {
   try {
     const raw = await req.json();
-
     if (!isStoryBody(raw)) {
       return NextResponse.json(
-        { error: 'Invalid body. Required: age_range ("2-5" | "6-10"). Optional: theme, skill, characters, tone, locale, reading_time_minutes.' },
+        { error: 'Invalid body. Requerido: age_range ("2-5" | "6-10").' },
         { status: 400 },
       );
     }
@@ -125,42 +113,45 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'OPENAI_API_KEY missing' }, { status: 500 });
     }
 
-    const system = buildSystemPrompt();
-    const user = buildUserPrompt(body);
-
-    // Modelo económico/rápido
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',          
+      model: 'gpt-4o-mini',
       temperature: 0.9,
       max_tokens: 1200,
       messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
+        { role: 'system', content: systemPrompt() },
+        { role: 'user', content: userPrompt(body) },
       ],
     });
 
-    const storyText = completion.choices?.[0]?.message?.content?.trim() ?? '';
-    if (!storyText) {
+    const story = completion.choices?.[0]?.message?.content?.trim() ?? '';
+    if (!story) {
       return NextResponse.json({ error: 'Empty story from model' }, { status: 502 });
     }
 
-    const res: StoryResponse = {
-      story: storyText,
-      meta: {
-        age_range: body.age_range,
-        theme: body.theme,
-        skill: body.skill,
-        tone: body.tone || 'tierno',
-        locale: body.locale || 'es-LATAM',
-        reading_time_minutes: body.reading_time_minutes ?? 4,
-      },
+    // Construimos meta por si el modelo no lo incluye, para mantener compatibilidad
+    const fallbackMeta = {
+      age_range: body.age_range,
+      theme: body.theme ?? '',
+      skill: body.skill ?? '',
+      tone: body.tone ?? 'tierno',
+      locale: body.locale ?? 'es-LATAM',
+      reading_time_minutes: body.reading_time_minutes ?? 4,
     };
 
-    return NextResponse.json(res, { status: 200 });
+    const hasJsonFence = story.includes('```json');
+    const hasClosingFence = story.trim().endsWith('```');
+
+    const content = hasJsonFence && hasClosingFence
+      ? story
+      : `${story}\n\n\`\`\`json\n${JSON.stringify(fallbackMeta)}\n\`\`\``;
+
+    // <-- RESPUESTA en el formato que tu app espera
+    return NextResponse.json({ content }, { status: 200 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Story generation failed';
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
+
 
 
