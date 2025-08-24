@@ -4,9 +4,11 @@ export const runtime = 'nodejs';
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY!,
+  organization: process.env.OPENAI_ORG_ID, 
+})
 
-// Prompt infantil
 function kidStylePrompt(story: string, age: '2-5'|'6-10', tone: string) {
   return [
     `Children's picture-book illustration for ages ${age}.`,
@@ -20,14 +22,18 @@ function kidStylePrompt(story: string, age: '2-5'|'6-10', tone: string) {
   ].join(' ');
 }
 
-// Solo tamaños válidos para gpt-image-1
-function sizeFromAR(ar?: string): '1024x1024'|'1024x1792'|'1792x1024' {
+type OpenAIImageSize = '1024x1024'|'1024x1792'|'1792x1024';
+function sizeFromAR(ar?: string): OpenAIImageSize {
   switch ((ar || '').toLowerCase()) {
     case '1:1': case 'square': return '1024x1024';
     case '9:16': case 'portrait': case '3:4': return '1024x1792';
     case '16:9': case 'landscape': case '4:3': return '1792x1024';
     default: return '1024x1024';
   }
+}
+function sanitizeSize(size?: string): OpenAIImageSize {
+  if (size === '1024x1024' || size === '1024x1792' || size === '1792x1024') return size;
+  return '1024x1024';
 }
 
 export async function POST(req: NextRequest) {
@@ -50,25 +56,33 @@ export async function POST(req: NextRequest) {
     }
 
     const prompt = kidStylePrompt(story, age_range, tone);
-    const finalSize: '1024x1024'|'1024x1792'|'1792x1024' =
-      (size === '1024x1024' || size === '1024x1792' || size === '1792x1024')
-        ? size
-        : sizeFromAR(aspect_ratio);
-
+    const finalSize: OpenAIImageSize = size ? sanitizeSize(size) : sizeFromAR(aspect_ratio);
     const n = Math.max(1, Math.min(Number(num_images) || 3, 3));
 
-    // (debug) para confirmar que tu deploy usa este archivo
     console.log('[illustrate] calling gpt-image-1', { finalSize, n });
 
+    // Sin response_format (deprecado para gpt-image-1)
     const res = await openai.images.generate({
       model: 'gpt-image-1',
       prompt,
-      size: finalSize,          // <-- Nunca 512x512
+      size: finalSize,
       n,
-      response_format: 'b64_json',
+      // quality: 'standard', // opcional
     });
 
-    const images = res.data.map((d) => `data:image/png;base64,${d.b64_json}`);
+    // La API devuelve data[].b64_json (o .url en algunos casos)
+    const dataArr = (res as any)?.data ?? [];
+    const images: string[] = dataArr
+      .map((d: any) =>
+        d?.b64_json
+          ? `data:image/png;base64,${d.b64_json}`
+          : (d?.url as string | undefined)
+      )
+      .filter(Boolean);
+
+    if (!images.length) {
+      return NextResponse.json({ error: 'No images returned' }, { status: 502 });
+    }
     return NextResponse.json({ provider: 'openai', size: finalSize, images }, { status: 200 });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || 'Illustration failed' }, { status: 502 });
