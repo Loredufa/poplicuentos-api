@@ -1,37 +1,56 @@
-// app/api/register/route.ts
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
-// Inicializar cliente con variables de entorno
+type RegisterBody = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  country?: string;
+  phone?: string;
+  language?: string;
+  password: string;
+};
+
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // usar Service Role para crear usuarios
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : "Internal Server Error";
+}
+
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === "string" && v.trim().length > 0;
+}
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const bodyUnknown = await req.json();
+    const b = bodyUnknown as Partial<RegisterBody>;
 
-    const { first_name, last_name, email, country, phone, language, password } = body;
-
-    if (!first_name || !last_name || !email || !password) {
+    if (
+      !isNonEmptyString(b.first_name) ||
+      !isNonEmptyString(b.last_name) ||
+      !isNonEmptyString(b.email) ||
+      !isNonEmptyString(b.password)
+    ) {
       return NextResponse.json(
-        { error: "Missing required fields" },
+        { error: "Missing required fields: first_name, last_name, email, password" },
         { status: 400 }
       );
     }
 
-    // Crear usuario en Supabase Auth
     const { data, error } = await supabase.auth.admin.createUser({
-      email,
-      password,
-      email_confirm: true, // marca email como confirmado
+      email: b.email,
+      password: b.password,
+      email_confirm: true,
       user_metadata: {
-        first_name,
-        last_name,
-        country,
-        phone,
-        language,
+        first_name: b.first_name,
+        last_name: b.last_name,
+        country: b.country ?? null,
+        phone: b.phone ?? null,
+        language: b.language ?? "es",
       },
     });
 
@@ -43,10 +62,7 @@ export async function POST(req: Request) {
       { message: "User registered successfully", user: data.user },
       { status: 201 }
     );
-  } catch (err: any) {
-    return NextResponse.json(
-      { error: err.message || "Internal Server Error" },
-      { status: 500 }
-    );
+  } catch (err: unknown) {
+    return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
   }
 }
