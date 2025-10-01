@@ -8,8 +8,8 @@ function errorMessage(err: unknown): string {
 export async function GET(req: Request) {
   try {
     const auth = req.headers.get("authorization") ?? "";
-    const parts = auth.split(" ");
-    const token = parts.length === 2 && /^Bearer$/i.test(parts[0]) ? parts[1] : "";
+    const [scheme, tokenCandidate] = auth.split(" ");
+    const token = /^Bearer$/i.test(scheme ?? "") ? tokenCandidate ?? "" : "";
 
     if (!token) {
       return NextResponse.json(

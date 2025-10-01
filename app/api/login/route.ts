@@ -11,14 +11,13 @@ const supabase = createClient(
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Internal Server Error";
 }
-
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
 export async function POST(req: Request) {
   try {
-    const bodyUnknown = await req.json();
+    const bodyUnknown: unknown = await req.json();
     const b = bodyUnknown as Partial<LoginBody>;
 
     if (!isNonEmptyString(b.email) || !isNonEmptyString(b.password)) {
@@ -45,3 +44,4 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
   }
 }
+
