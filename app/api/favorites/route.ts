@@ -1,97 +1,53 @@
-// app/api/favorites/route.ts
-export const runtime = 'nodejs';
-
-import { supabaseAdmin, type Database } from '@/lib/supabaseAdmin';
 import { NextRequest, NextResponse } from 'next/server';
+import { admin, type FavoriteRow } from '../../../supabaseAdmin';
 
-type UUID = string;
-type FavoriteRow = Database['public']['Tables']['favorites']['Row'];
-type FavoriteInsert = Database['public']['Tables']['favorites']['Insert'];
 
-async function getAuthUser(req: NextRequest) {
-  const authHeader = req.headers.get('authorization') || req.headers.get('Authorization') || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+const COLS =
+  'id,title,story,age_range,skill,tone,minutes,created_at,user_id';
 
-  if (!token) return { userId: null as UUID | null, error: 'Falta Authorization Bearer token' };
-
-  const { data, error } = await supabaseAdmin.auth.getUser(token);
-  if (error || !data?.user) return { userId: null as UUID | null, error: error?.message || 'Token inválido' };
-
-  return { userId: data.user.id as UUID, error: null as string | null };
-}
-
-/** GET /api/favorites */
 export async function GET(req: NextRequest) {
-  const { userId, error } = await getAuthUser(req);
-  if (!userId) return NextResponse.json({ error }, { status: 401 });
+  const userId = req.headers.get('x-user-id');
+  if (!userId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
-  const { searchParams } = new URL(req.url);
-  const limit = Number(searchParams.get('limit') ?? '50');
-  const finalLimit = Number.isFinite(limit) ? limit : 50;
+  const url = new URL(req.url);
+  const limit = Number(url.searchParams.get('limit') ?? '50');
 
-  const { data, error: qErr } = await supabaseAdmin
-    .from('favorites') // <- sin genéricos
-    .select('id,title,story,age_range,skill,tone,minutes,created_at')
+  const { data, error } = await admin
+    .from('favorites')
+    .select(COLS)
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
-    .limit(finalLimit);
+    .limit(Number.isFinite(limit) ? limit : 50);
 
-  if (qErr) return NextResponse.json({ error: qErr.message }, { status: 500 });
-  return NextResponse.json({ items: (data || []) as FavoriteRow[] }, { status: 200 });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // data ya es FavoriteRow[] porque el cliente está tipado con Database
+  return NextResponse.json({ favorites: data as FavoriteRow[] }, { status: 200 });
 }
 
-/** POST /api/favorites */
 export async function POST(req: NextRequest) {
-  const { userId, error } = await getAuthUser(req);
-  if (!userId) return NextResponse.json({ error }, { status: 401 });
+  const userId = req.headers.get('x-user-id');
+  if (!userId) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: 'JSON inválido' }, { status: 400 });
-  }
+  const body = await req.json();
 
-  const { title, story, age_range, skill, tone, minutes } = (body ?? {}) as Partial<FavoriteInsert>;
-  if (!title || !story) {
-    return NextResponse.json({ error: 'Faltan title y story' }, { status: 400 });
-  }
-
-  const payload: FavoriteInsert = {
+  const payload = {
     user_id: userId,
-    title,
-    story,
-    age_range: (age_range as FavoriteInsert['age_range']) || '',
-    skill: skill || '',
-    tone: tone || '',
-    minutes: typeof minutes === 'number' ? minutes : null,
+    title: body.title ?? body.meta?.title ?? 'Mi cuento',
+    story: body.story,
+    age_range: body.age_range,
+    skill: body.skill,
+    tone: body.tone,
+    minutes: Number(body.minutes ?? 4),
   };
 
-  const { data, error: insErr } = await supabaseAdmin
-    .from('favorites') // <- sin genéricos
+  const { data, error } = await admin
+    .from('favorites')
     .insert(payload)
-    .select('id,title,story,age_range,skill,tone,minutes,created_at')
+    .select(COLS)
     .single();
 
-  if (insErr) return NextResponse.json({ error: insErr.message }, { status: 500 });
-  return NextResponse.json({ item: data as FavoriteRow }, { status: 201 });
-}
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
-/** DELETE /api/favorites?id=<uuid> */
-export async function DELETE(req: NextRequest) {
-  const { userId, error } = await getAuthUser(req);
-  if (!userId) return NextResponse.json({ error }, { status: 401 });
-
-  const { searchParams } = new URL(req.url);
-  const id = searchParams.get('id');
-  if (!id) return NextResponse.json({ error: 'Falta id' }, { status: 400 });
-
-  const { error: delErr } = await supabaseAdmin
-    .from('favorites') // <- sin genéricos
-    .delete()
-    .eq('id', id)
-    .eq('user_id', userId);
-
-  if (delErr) return NextResponse.json({ error: delErr.message }, { status: 500 });
-  return NextResponse.json({ ok: true }, { status: 200 });
+  return NextResponse.json({ favorite: data as FavoriteRow }, { status: 201 });
 }
