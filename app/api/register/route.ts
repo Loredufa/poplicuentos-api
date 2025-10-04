@@ -1,6 +1,4 @@
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
+// app/api/register/route.ts
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
@@ -14,44 +12,31 @@ type RegisterBody = {
   password: string;
 };
 
-// Service Role (solo server-side, Node runtime)
-const admin = () =>
-  createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  );
+const isStr = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : "Internal Server Error");
 
-// Anon para login automático
+// Cliente ANON (sirve en Edge o Node)
 const anon = () =>
   createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
   );
 
-const isStr = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
-const errMsg = (e: unknown) => (e instanceof Error ? e.message : "Internal Server Error");
-
 export async function POST(req: Request) {
   try {
-    // 1) Content-Type debe ser JSON
     const ct = req.headers.get("content-type") || "";
     if (!ct.toLowerCase().includes("application/json")) {
-      return NextResponse.json(
-        { error: "Content-Type debe ser application/json" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Content-Type debe ser application/json" }, { status: 400 });
     }
 
-    // 2) Parseo body
     let raw: unknown;
     try {
       raw = await req.json();
     } catch {
       return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
     }
-    const b = raw as Partial<RegisterBody>;
 
-    // 3) Validación de requeridos
+    const b = raw as Partial<RegisterBody>;
     const missing = [
       ["first_name", b.first_name],
       ["last_name", b.last_name],
@@ -68,54 +53,55 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4) Crear usuario
-    const adm = admin();
-    const { data, error } = await adm.auth.admin.createUser({
+    const supabase = anon();
+    const { data, error } = await supabase.auth.signUp({
       email: b.email!,
       password: b.password!,
-      email_confirm: true,
-      user_metadata: {
-        first_name: b.first_name!,
-        last_name: b.last_name!,
-        country: isStr(b.country) ? b.country : null,
-        phone: isStr(b.phone) ? b.phone : null,
-        language: isStr(b.language) ? b.language : "es",
+      options: {
+        data: {
+          first_name: b.first_name!,
+          last_name: b.last_name!,
+          country: isStr(b.country) ? b.country : null,
+        // acepta “Argentina” o “AR”; lo guardamos tal cual
+          phone: isStr(b.phone) ? b.phone : null,
+          language: isStr(b.language) ? b.language : "es",
+        },
+        // Si luego implementás deep link, podés setear emailRedirectTo aquí
+        // emailRedirectTo: process.env.RESET_PASSWORD_REDIRECT_URL,
       },
     });
 
     if (error) {
       const msg = (error.message || "").toLowerCase();
-      if (msg.includes("already") || msg.includes("exists") || msg.includes("registered")) {
+      // Mapear “ya registrado” a 409 (cubre variantes de Supabase)
+      if (
+        msg.includes("already") || msg.includes("exists") ||
+        msg.includes("registered") || msg.includes("duplicate")
+      ) {
         return NextResponse.json({ error: "Email ya registrado" }, { status: 409 });
       }
+      // Password policy u otros -> 400 con detalle
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
-    // 5) Login automático (variante A esperada por tu app)
-    const a = anon();
-    const { data: signed } = await a.auth.signInWithPassword({
-      email: b.email!,
-      password: b.password!,
-    });
-
-    if (signed?.session?.access_token && signed.user) {
+    // Variante A (login automático): si tu proyecto permite sesión inmediata
+    if (data?.session?.access_token && data.user) {
       return NextResponse.json(
         {
-          token: signed.session.access_token,
-          user: { id: signed.user.id, email: signed.user.email },
+          token: data.session.access_token,
+          user: { id: data.user.id, email: data.user.email },
         },
         { status: 200 }
       );
     }
 
-    // 6) Variante B: verificación por email
+    // Variante B (verificación por email)
     return NextResponse.json({ user_id: data.user?.id }, { status: 200 });
   } catch (e: unknown) {
     return NextResponse.json({ error: errMsg(e) }, { status: 500 });
   }
 }
 
-// 405 explícito
 export async function GET() {
   return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
 }
