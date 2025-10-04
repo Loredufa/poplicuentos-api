@@ -1,47 +1,54 @@
-import { createClient } from "@supabase/supabase-js";
+import { errorMessage, supabaseAnon } from "@/lib/supabase";
 import { NextResponse } from "next/server";
 
 type LoginBody = { email: string; password: string };
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : "Internal Server Error";
-}
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
 export async function POST(req: Request) {
   try {
-    const bodyUnknown: unknown = await req.json();
-    const b = bodyUnknown as Partial<LoginBody>;
+    const raw: unknown = await req.json();
+    const body = raw as Partial<LoginBody>;
 
-    if (!isNonEmptyString(b.email) || !isNonEmptyString(b.password)) {
-      return NextResponse.json(
-        { error: "Email and password are required" },
-        { status: 400 }
-      );
+    if (!isNonEmptyString(body.email) || !isNonEmptyString(body.password)) {
+      return NextResponse.json({ error: "Body inválido" }, { status: 400 });
     }
 
+    const supabase = supabaseAnon();
     const { data, error } = await supabase.auth.signInWithPassword({
-      email: b.email,
-      password: b.password,
+      email: body.email,
+      password: body.password,
     });
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 401 });
+    if (error || !data.session || !data.user) {
+      return NextResponse.json({ error: "Credenciales inválidas" }, { status: 401 });
     }
 
+    const token = data.session.access_token;
+    const md = data.user.user_metadata || {};
     return NextResponse.json(
-      { message: "Login successful", session: data.session, user: data.user },
+      {
+        token,
+        user: {
+          id: data.user.id,
+          email: data.user.email,
+          first_name: md.first_name ?? null,
+          last_name: md.last_name ?? null,
+        },
+      },
       { status: 200 }
     );
   } catch (err: unknown) {
+    // Si tuvieras rate limit, acá mapearías a 429 según tu middleware
     return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
   }
 }
+
+// 405 para otros métodos
+export async function GET() {
+  return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
+}
+
 
