@@ -1,4 +1,6 @@
 // app/api/favorites/route.ts
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 

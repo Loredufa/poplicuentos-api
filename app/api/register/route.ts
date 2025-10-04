@@ -1,4 +1,7 @@
-import { errorMessage, supabaseAdmin, supabaseAnon } from "@/lib/supabase";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 
 type RegisterBody = {
@@ -11,72 +14,108 @@ type RegisterBody = {
   password: string;
 };
 
-function isNonEmptyString(v: unknown): v is string {
-  return typeof v === "string" && v.trim().length > 0;
-}
+// Service Role (solo server-side, Node runtime)
+const admin = () =>
+  createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+
+// Anon para login automático
+const anon = () =>
+  createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+
+const isStr = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : "Internal Server Error");
 
 export async function POST(req: Request) {
   try {
-    const raw: unknown = await req.json();
-    const b = raw as Partial<RegisterBody>;
-
-    if (
-      !isNonEmptyString(b.first_name) ||
-      !isNonEmptyString(b.last_name) ||
-      !isNonEmptyString(b.email) ||
-      !isNonEmptyString(b.password)
-    ) {
-      return NextResponse.json({ error: "Body inválido" }, { status: 400 });
+    // 1) Content-Type debe ser JSON
+    const ct = req.headers.get("content-type") || "";
+    if (!ct.toLowerCase().includes("application/json")) {
+      return NextResponse.json(
+        { error: "Content-Type debe ser application/json" },
+        { status: 400 }
+      );
     }
 
-    // Crear usuario con Service Role
-    const admin = supabaseAdmin();
-    const { data, error } = await admin.auth.admin.createUser({
-      email: b.email,
-      password: b.password,
+    // 2) Parseo body
+    let raw: unknown;
+    try {
+      raw = await req.json();
+    } catch {
+      return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
+    }
+    const b = raw as Partial<RegisterBody>;
+
+    // 3) Validación de requeridos
+    const missing = [
+      ["first_name", b.first_name],
+      ["last_name", b.last_name],
+      ["email", b.email],
+      ["password", b.password],
+    ]
+      .filter(([_, v]) => !isStr(v))
+      .map(([k]) => k);
+
+    if (missing.length) {
+      return NextResponse.json(
+        { error: `Body inválido. Faltan: ${missing.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
+    // 4) Crear usuario
+    const adm = admin();
+    const { data, error } = await adm.auth.admin.createUser({
+      email: b.email!,
+      password: b.password!,
+      email_confirm: true,
       user_metadata: {
-        first_name: b.first_name,
-        last_name: b.last_name,
-        country: b.country ?? null,
-        phone: b.phone ?? null,
-        language: b.language ?? "es",
+        first_name: b.first_name!,
+        last_name: b.last_name!,
+        country: isStr(b.country) ? b.country : null,
+        phone: isStr(b.phone) ? b.phone : null,
+        language: isStr(b.language) ? b.language : "es",
       },
-      email_confirm: true, // puedes cambiarlo si quieres verificación por mail
     });
 
     if (error) {
-      // Mapear "ya existe" a 409
       const msg = (error.message || "").toLowerCase();
-      if (msg.includes("already registered") || msg.includes("user already exists")) {
+      if (msg.includes("already") || msg.includes("exists") || msg.includes("registered")) {
         return NextResponse.json({ error: "Email ya registrado" }, { status: 409 });
       }
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
-    // Variante A: registro + login automático (preferida por tu front)
-    const anon = supabaseAnon();
-    const { data: d2 } = await anon.auth.signInWithPassword({
-      email: b.email,
-      password: b.password,
+    // 5) Login automático (variante A esperada por tu app)
+    const a = anon();
+    const { data: signed } = await a.auth.signInWithPassword({
+      email: b.email!,
+      password: b.password!,
     });
 
-    if (d2?.session?.access_token && d2.user) {
+    if (signed?.session?.access_token && signed.user) {
       return NextResponse.json(
         {
-          token: d2.session.access_token,
-          user: { id: d2.user.id, email: d2.user.email },
+          token: signed.session.access_token,
+          user: { id: signed.user.id, email: signed.user.email },
         },
         { status: 200 }
       );
     }
 
-    // Variante B: si no hay sesión (p.ej., requiere verificación), devolvemos user_id
+    // 6) Variante B: verificación por email
     return NextResponse.json({ user_id: data.user?.id }, { status: 200 });
-  } catch (err: unknown) {
-    return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
+  } catch (e: unknown) {
+    return NextResponse.json({ error: errMsg(e) }, { status: 500 });
   }
 }
 
+// 405 explícito
 export async function GET() {
   return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
 }
