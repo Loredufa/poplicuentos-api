@@ -1,6 +1,9 @@
 // app/api/register/route.ts
-import { createClient } from "@supabase/supabase-js";
+export const runtime = "nodejs";        // Service Role => Node
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 type RegisterBody = {
   first_name: string;
@@ -15,25 +18,31 @@ type RegisterBody = {
 const isStr = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : "Internal Server Error");
 
-// Cliente ANON (sirve en Edge o Node)
-const anon = () =>
-  createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
+const admin = (): SupabaseClient =>
+  createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+const anon = (): SupabaseClient =>
+  createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+
+// parser tolerante: acepta JSON aunque el header venga mal desde la APK
+async function readBodyAsJson(req: Request): Promise<unknown | null> {
+  const ct = (req.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("application/json")) {
+    try { return await req.json(); } catch { /* fall through */ }
+  }
+  try {
+    const txt = await req.text();
+    if (!txt) return null;
+    return JSON.parse(txt);
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(req: Request) {
   try {
-    const ct = req.headers.get("content-type") || "";
-    if (!ct.toLowerCase().includes("application/json")) {
-      return NextResponse.json({ error: "Content-Type debe ser application/json" }, { status: 400 });
-    }
-
-    let raw: unknown;
-    try {
-      raw = await req.json();
-    } catch {
-      return NextResponse.json({ error: "JSON inválido" }, { status: 400 });
+    const raw = await readBodyAsJson(req);
+    if (!raw || typeof raw !== "object") {
+      return NextResponse.json({ error: "Body inválido o no-JSON" }, { status: 400 });
     }
 
     const b = raw as Partial<RegisterBody>;
@@ -42,9 +51,7 @@ export async function POST(req: Request) {
       ["last_name", b.last_name],
       ["email", b.email],
       ["password", b.password],
-    ]
-      .filter(([_, v]) => !isStr(v))
-      .map(([k]) => k);
+    ].filter(([_, v]) => !isStr(v)).map(([k]) => k);
 
     if (missing.length) {
       return NextResponse.json(
@@ -53,50 +60,58 @@ export async function POST(req: Request) {
       );
     }
 
-    const supabase = anon();
-    const { data, error } = await supabase.auth.signUp({
-      email: b.email!,
-      password: b.password!,
-      options: {
-        data: {
-          first_name: b.first_name!,
-          last_name: b.last_name!,
-          country: isStr(b.country) ? b.country : null,
-        // acepta “Argentina” o “AR”; lo guardamos tal cual
-          phone: isStr(b.phone) ? b.phone : null,
-          language: isStr(b.language) ? b.language : "es",
-        },
-        // Si luego implementás deep link, podés setear emailRedirectTo aquí
-        // emailRedirectTo: process.env.RESET_PASSWORD_REDIRECT_URL,
-      },
+    // normalizamos email y campos
+    const email = b.email!.trim().toLowerCase();
+    const first_name = b.first_name!.trim();
+    const last_name = b.last_name!.trim();
+    const country = isStr(b.country) ? b.country.trim() : null;   // "AR" o "Argentina", lo guardamos tal cual
+    const phone = isStr(b.phone) ? b.phone.trim() : null;
+    const language = isStr(b.language) ? b.language.trim() : "es";
+    const password = b.password!; // si tu policy es estricta, validala aquí
+
+    const sa = admin();
+
+    // 1) Chequeo de existencia idempotente (evita duplicados y carreras)
+    // listUsers no tiene filtro exacto, así que filtramos client-side
+    const { data: listed, error: listErr } = await sa.auth.admin.listUsers({ perPage: 200 }); 
+    if (listErr) {
+      return NextResponse.json({ error: listErr.message }, { status: 400 });
+    }
+    const exists = listed?.users?.some(u => u.email?.toLowerCase() === email) ?? false;
+    if (exists) {
+      return NextResponse.json({ error: "Email ya registrado" }, { status: 409 });
+    }
+
+    // 2) Crear usuario (Service Role, Node runtime)
+    const { data: created, error } = await sa.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true, // o false si querés verificación por email
+      user_metadata: { first_name, last_name, country, phone, language },
     });
 
     if (error) {
-      const msg = (error.message || "").toLowerCase();
-      // Mapear “ya registrado” a 409 (cubre variantes de Supabase)
-      if (
-        msg.includes("already") || msg.includes("exists") ||
-        msg.includes("registered") || msg.includes("duplicate")
-      ) {
+      const m = (error.message || "").toLowerCase();
+      if (m.includes("already") || m.includes("exists") || m.includes("duplicate") || m.includes("registered")) {
         return NextResponse.json({ error: "Email ya registrado" }, { status: 409 });
       }
-      // Password policy u otros -> 400 con detalle
+      // GoTrue a veces devuelve "database error saving new user" para violaciones genéricas
       return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
-    // Variante A (login automático): si tu proyecto permite sesión inmediata
-    if (data?.session?.access_token && data.user) {
+    // 3) Login automático (variante A) si tu proyecto permite sesión inmediata
+    // (si tenés "Email confirmations = ON", probablemente no retorna sesión, y devolvemos user_id)
+    const a = anon();
+    const { data: signed } = await a.auth.signInWithPassword({ email, password });
+    if (signed?.session?.access_token && signed.user) {
       return NextResponse.json(
-        {
-          token: data.session.access_token,
-          user: { id: data.user.id, email: data.user.email },
-        },
+        { token: signed.session.access_token, user: { id: signed.user.id, email: signed.user.email } },
         { status: 200 }
       );
     }
 
-    // Variante B (verificación por email)
-    return NextResponse.json({ user_id: data.user?.id }, { status: 200 });
+    // 4) Variante B: verificación por email
+    return NextResponse.json({ user_id: created.user?.id }, { status: 200 });
   } catch (e: unknown) {
     return NextResponse.json({ error: errMsg(e) }, { status: 500 });
   }
@@ -105,4 +120,3 @@ export async function POST(req: Request) {
 export async function GET() {
   return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
 }
-
