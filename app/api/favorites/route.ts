@@ -2,7 +2,7 @@
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 import { createClient } from "@supabase/supabase-js";
-import { NextResponse } from "next/server";
+import { jsonWithCors, optionsResponse } from "@/lib/cors";
 
 // --- Tipos mínimos de tu tabla (ajústalos si tu esquema real difiere) ---
 type FavoritesInsert = {
@@ -80,17 +80,19 @@ const COLS =
 // Header: Authorization: Bearer <token>
 // ----------------------------------------------------------------------
 export async function POST(req: Request) {
+  const respond = (body: unknown, init?: ResponseInit) =>
+    jsonWithCors(req, body, init);
   try {
     const token = bearer(req.headers.get("authorization"));
     if (!token) {
-      return NextResponse.json({ error: "Token faltante" }, { status: 401 });
+      return respond({ error: "Token faltante" }, { status: 401 });
     }
 
     // Validamos al usuario con el token (anon - valida JWT)
     const a = anon();
     const { data: who, error: whoErr } = await a.auth.getUser(token);
     if (whoErr || !who.user) {
-      return NextResponse.json({ error: "Token inválido" }, { status: 403 });
+      return respond({ error: "Token inválido" }, { status: 403 });
     }
     const userId = who.user.id;
 
@@ -106,13 +108,13 @@ export async function POST(req: Request) {
 
     // Validación mínima
     if (!isStr(body.title) || !isStr(body.story)) {
-      return NextResponse.json(
+      return respond(
         { error: "Body inválido: title y story son requeridos" },
         { status: 400 }
       );
     }
     if (body.minutes !== undefined && !isNum(body.minutes)) {
-      return NextResponse.json(
+      return respond(
         { error: "Body inválido: minutes debe ser número" },
         { status: 400 }
       );
@@ -137,12 +139,12 @@ export async function POST(req: Request) {
       .single();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return respond({ error: error.message }, { status: 400 });
     }
 
-    return NextResponse.json(data, { status: 200 });
+    return respond(data, { status: 200 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
+    return respond({ error: errorMessage(err) }, { status: 500 });
   }
 }
 
@@ -151,16 +153,18 @@ export async function POST(req: Request) {
 // Header: Authorization: Bearer <token>
 // ----------------------------------------------------------------------
 export async function GET(req: Request) {
+  const respond = (body: unknown, init?: ResponseInit) =>
+    jsonWithCors(req, body, init);
   try {
     const token = bearer(req.headers.get("authorization"));
     if (!token) {
-      return NextResponse.json({ error: "Token faltante" }, { status: 401 });
+      return respond({ error: "Token faltante" }, { status: 401 });
     }
 
     const a = anon();
     const { data: who, error: whoErr } = await a.auth.getUser(token);
     if (whoErr || !who.user) {
-      return NextResponse.json({ error: "Token inválido" }, { status: 403 });
+      return respond({ error: "Token inválido" }, { status: 403 });
     }
     const userId = who.user.id;
 
@@ -173,10 +177,14 @@ export async function GET(req: Request) {
       .order("created_at", { ascending: false });
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return respond({ error: error.message }, { status: 400 });
     }
-    return NextResponse.json(data ?? [], { status: 200 });
+    return respond(data ?? [], { status: 200 });
   } catch (err: unknown) {
-    return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
+    return respond({ error: errorMessage(err) }, { status: 500 });
   }
+}
+
+export function OPTIONS(req: Request) {
+  return optionsResponse(req);
 }

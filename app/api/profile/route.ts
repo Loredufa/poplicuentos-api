@@ -7,7 +7,7 @@ import {
   supabaseAdmin,
   supabaseAnon,
 } from "@/lib/supabase";
-import { NextResponse } from "next/server";
+import { jsonWithCors, optionsResponse } from "@/lib/cors";
 
 type ProfilePatch = {
   first_name?: string;
@@ -19,10 +19,12 @@ type ProfilePatch = {
 };
 
 export async function PUT(req: Request) {
+  const respond = (body: unknown, init?: ResponseInit) =>
+    jsonWithCors(req, body, init);
   try {
     const token = bearerTokenFromAuthHeader(req.headers.get("authorization"));
     if (!token) {
-      return NextResponse.json({ error: "Token faltante" }, { status: 401 });
+      return respond({ error: "Token faltante" }, { status: 401 });
     }
 
     const bodyUnknown: unknown = await req.json();
@@ -31,7 +33,7 @@ export async function PUT(req: Request) {
     const anon = supabaseAnon();
     const { data: auth, error: authErr } = await anon.auth.getUser(token);
     if (authErr || !auth.user) {
-      return NextResponse.json({ error: "Token inválido" }, { status: 403 });
+      return respond({ error: "Token inválido" }, { status: 403 });
     }
 
     // Usamos Service Role para actualizar metadata del usuario por id
@@ -61,30 +63,31 @@ export async function PUT(req: Request) {
     if (updErr) {
       const msg = (updErr.message || "").toLowerCase();
       if (updateEmail && (msg.includes("already registered") || msg.includes("exists"))) {
-        return NextResponse.json({ error: "Email en uso" }, { status: 409 });
+        return respond({ error: "Email en uso" }, { status: 409 });
       }
-      return NextResponse.json({ error: updErr.message }, { status: 400 });
+      return respond({ error: updErr.message }, { status: 400 });
     }
 
     const u = upd?.user;
     const md = u?.user_metadata || {};
-    return NextResponse.json(
-      {
-        id: u?.id,
-        email: u?.email,
-        first_name: md.first_name ?? null,
-        last_name: md.last_name ?? null,
-        language: md.language ?? null,
-        country: md.country ?? null,
-        phone: md.phone ?? null,
-      },
-      { status: 200 }
-    );
+    return respond({
+      id: u?.id,
+      email: u?.email,
+      first_name: md.first_name ?? null,
+      last_name: md.last_name ?? null,
+      language: md.language ?? null,
+      country: md.country ?? null,
+      phone: md.phone ?? null,
+    });
   } catch (err: unknown) {
-    return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
+    return respond({ error: errorMessage(err) }, { status: 500 });
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
+export async function GET(req: Request) {
+  return jsonWithCors(req, { message: "Method Not Allowed" }, { status: 405 });
+}
+
+export function OPTIONS(req: Request) {
+  return optionsResponse(req);
 }

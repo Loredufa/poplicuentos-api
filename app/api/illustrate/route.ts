@@ -1,8 +1,9 @@
 // app/api/illustrate/route.ts
 export const runtime = 'nodejs';
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
+import { jsonWithCors, optionsResponse } from '@/lib/cors';
 
 // ---------- Tipos ----------
 type AgeRange = '2-5' | '6-10';
@@ -85,7 +86,11 @@ export async function POST(req: NextRequest) {
     const parsed = (await req.json()) as unknown;
 
     if (!isIllustrateBody(parsed)) {
-      return NextResponse.json({ error: 'Invalid body: story & age_range required' }, { status: 400 });
+      return jsonWithCors(
+        req,
+        { error: 'Invalid body: story & age_range required' },
+        { status: 400 },
+      );
     }
 
     const {
@@ -98,7 +103,7 @@ export async function POST(req: NextRequest) {
     } = parsed;
 
     if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json({ error: 'OPENAI_API_KEY missing' }, { status: 500 });
+      return jsonWithCors(req, { error: 'OPENAI_API_KEY missing' }, { status: 500 });
     }
 
     const prompt = kidStylePrompt(story, age_range, tone);
@@ -114,7 +119,11 @@ export async function POST(req: NextRequest) {
     });
 
     if (!isImagesResponse(res)) {
-      return NextResponse.json({ error: 'Unexpected response from OpenAI' }, { status: 502 });
+      return jsonWithCors(
+        req,
+        { error: 'Unexpected response from OpenAI' },
+        { status: 502 },
+      );
     }
 
     const images = res.data
@@ -122,12 +131,20 @@ export async function POST(req: NextRequest) {
       .filter((u): u is string => u.length > 0);
 
     if (!images.length) {
-      return NextResponse.json({ error: 'No images returned' }, { status: 502 });
+      return jsonWithCors(req, { error: 'No images returned' }, { status: 502 });
     }
 
-    return NextResponse.json({ provider: 'openai', size: finalSize, images }, { status: 200 });
+    return jsonWithCors(
+      req,
+      { provider: 'openai', size: finalSize, images },
+      { status: 200 },
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Illustration failed';
-    return NextResponse.json({ error: msg }, { status: 502 });
+    return jsonWithCors(req, { error: msg }, { status: 502 });
   }
+}
+
+export function OPTIONS(req: Request) {
+  return optionsResponse(req);
 }

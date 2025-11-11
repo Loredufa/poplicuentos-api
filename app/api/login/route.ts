@@ -1,5 +1,5 @@
 import { errorMessage, supabaseAnon } from "@/lib/supabase";
-import { NextResponse } from "next/server";
+import { jsonWithCors, optionsResponse } from "@/lib/cors";
 
 type LoginBody = { email: string; password: string };
 
@@ -13,7 +13,7 @@ export async function POST(req: Request) {
     const body = raw as Partial<LoginBody>;
 
     if (!isNonEmptyString(body.email) || !isNonEmptyString(body.password)) {
-      return NextResponse.json({ error: "Body inválido" }, { status: 400 });
+      return jsonWithCors(req, { error: "Body inválido" }, { status: 400 });
     }
 
     const supabase = supabaseAnon();
@@ -23,12 +23,13 @@ export async function POST(req: Request) {
     });
 
     if (error || !data.session || !data.user) {
-      return NextResponse.json({ error: "Credenciales inválidas" }, { status: 401 });
+      return jsonWithCors(req, { error: "Credenciales inválidas" }, { status: 401 });
     }
 
     const token = data.session.access_token;
     const md = data.user.user_metadata || {};
-    return NextResponse.json(
+    return jsonWithCors(
+      req,
       {
         token,
         user: {
@@ -37,18 +38,20 @@ export async function POST(req: Request) {
           first_name: md.first_name ?? null,
           last_name: md.last_name ?? null,
         },
-      },
-      { status: 200 }
+      }
     );
   } catch (err: unknown) {
     // Si tuvieras rate limit, acá mapearías a 429 según tu middleware
-    return NextResponse.json({ error: errorMessage(err) }, { status: 500 });
+    return jsonWithCors(req, { error: errorMessage(err) }, { status: 500 });
   }
 }
 
 // 405 para otros métodos
-export async function GET() {
-  return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
+export async function GET(req: Request) {
+  return jsonWithCors(req, { message: "Method Not Allowed" }, { status: 405 });
 }
 
+export function OPTIONS(req: Request) {
+  return optionsResponse(req);
+}
 

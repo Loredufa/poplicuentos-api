@@ -1,7 +1,8 @@
 export const runtime = 'nodejs';
 
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import OpenAI from 'openai';
+import { jsonWithCors, optionsResponse } from '@/lib/cors';
 
 // -------- Tipos --------
 type AgeRange = '2-5' | '6-10';
@@ -93,7 +94,8 @@ export async function POST(req: NextRequest) {
   try {
     const raw = await req.json();
     if (!isStoryBody(raw)) {
-      return NextResponse.json(
+      return jsonWithCors(
+        req,
         { error: 'Invalid body. Requerido: age_range ("2-5" | "6-10").' },
         { status: 400 },
       );
@@ -110,7 +112,7 @@ export async function POST(req: NextRequest) {
     };
 
     if (!process.env.OPENAI_API_KEY) {
-      return NextResponse.json({ error: 'OPENAI_API_KEY missing' }, { status: 500 });
+      return jsonWithCors(req, { error: 'OPENAI_API_KEY missing' }, { status: 500 });
     }
 
     const completion = await openai.chat.completions.create({
@@ -125,7 +127,7 @@ export async function POST(req: NextRequest) {
 
     const story = completion.choices?.[0]?.message?.content?.trim() ?? '';
     if (!story) {
-      return NextResponse.json({ error: 'Empty story from model' }, { status: 502 });
+      return jsonWithCors(req, { error: 'Empty story from model' }, { status: 502 });
     }
 
     // Construimos meta por si el modelo no lo incluye, para mantener compatibilidad
@@ -146,12 +148,15 @@ export async function POST(req: NextRequest) {
       : `${story}\n\n\`\`\`json\n${JSON.stringify(fallbackMeta)}\n\`\`\``;
 
     // <-- RESPUESTA en el formato que tu app espera
-    return NextResponse.json({ content }, { status: 200 });
+    return jsonWithCors(req, { content }, { status: 200 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Story generation failed';
-    return NextResponse.json({ error: msg }, { status: 502 });
+    return jsonWithCors(req, { error: msg }, { status: 502 });
   }
 }
 
+export function OPTIONS(req: Request) {
+  return optionsResponse(req);
+}
 
 

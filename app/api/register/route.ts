@@ -2,7 +2,7 @@
 export const runtime = "nodejs";        // Service Role => Node
 export const dynamic = "force-dynamic";
 
-import { NextResponse } from "next/server";
+import { jsonWithCors, optionsResponse } from "@/lib/cors";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 type RegisterBody = {
@@ -39,10 +39,12 @@ async function readBodyAsJson(req: Request): Promise<unknown | null> {
 }
 
 export async function POST(req: Request) {
+  const respond = (body: unknown, init?: ResponseInit) =>
+    jsonWithCors(req, body, init);
   try {
     const raw = await readBodyAsJson(req);
     if (!raw || typeof raw !== "object") {
-      return NextResponse.json({ error: "Body inválido o no-JSON" }, { status: 400 });
+      return respond({ error: "Body inválido o no-JSON" }, { status: 400 });
     }
 
     const b = raw as Partial<RegisterBody>;
@@ -54,7 +56,7 @@ export async function POST(req: Request) {
     ].filter(([_, v]) => !isStr(v)).map(([k]) => k);
 
     if (missing.length) {
-      return NextResponse.json(
+      return respond(
         { error: `Body inválido. Faltan: ${missing.join(", ")}` },
         { status: 400 }
       );
@@ -75,11 +77,11 @@ export async function POST(req: Request) {
     // listUsers no tiene filtro exacto, así que filtramos client-side
     const { data: listed, error: listErr } = await sa.auth.admin.listUsers({ perPage: 200 }); 
     if (listErr) {
-      return NextResponse.json({ error: listErr.message }, { status: 400 });
+      return respond({ error: listErr.message }, { status: 400 });
     }
     const exists = listed?.users?.some(u => u.email?.toLowerCase() === email) ?? false;
     if (exists) {
-      return NextResponse.json({ error: "Email ya registrado" }, { status: 409 });
+      return respond({ error: "Email ya registrado" }, { status: 409 });
     }
 
     // 2) Crear usuario (Service Role, Node runtime)
@@ -93,10 +95,10 @@ export async function POST(req: Request) {
     if (error) {
       const m = (error.message || "").toLowerCase();
       if (m.includes("already") || m.includes("exists") || m.includes("duplicate") || m.includes("registered")) {
-        return NextResponse.json({ error: "Email ya registrado" }, { status: 409 });
+        return respond({ error: "Email ya registrado" }, { status: 409 });
       }
       // GoTrue a veces devuelve "database error saving new user" para violaciones genéricas
-      return NextResponse.json({ error: error.message }, { status: 400 });
+      return respond({ error: error.message }, { status: 400 });
     }
 
     // 3) Login automático (variante A) si tu proyecto permite sesión inmediata
@@ -104,19 +106,23 @@ export async function POST(req: Request) {
     const a = anon();
     const { data: signed } = await a.auth.signInWithPassword({ email, password });
     if (signed?.session?.access_token && signed.user) {
-      return NextResponse.json(
-        { token: signed.session.access_token, user: { id: signed.user.id, email: signed.user.email } },
-        { status: 200 }
-      );
+      return respond({
+        token: signed.session.access_token,
+        user: { id: signed.user.id, email: signed.user.email },
+      });
     }
 
     // 4) Variante B: verificación por email
-    return NextResponse.json({ user_id: created.user?.id }, { status: 200 });
+    return respond({ user_id: created.user?.id }, { status: 200 });
   } catch (e: unknown) {
-    return NextResponse.json({ error: errMsg(e) }, { status: 500 });
+    return respond({ error: errMsg(e) }, { status: 500 });
   }
 }
 
-export async function GET() {
-  return NextResponse.json({ message: "Method Not Allowed" }, { status: 405 });
+export async function GET(req: Request) {
+  return jsonWithCors(req, { message: "Method Not Allowed" }, { status: 405 });
+}
+
+export function OPTIONS(req: Request) {
+  return optionsResponse(req);
 }
