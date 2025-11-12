@@ -1,86 +1,133 @@
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-import {
-  bearerTokenFromAuthHeader,
-  errorMessage,
-  supabaseAdmin,
-  supabaseAnon,
-} from "@/lib/supabase";
+import { eq } from "drizzle-orm";
+import { z } from "zod";
+import { db } from "@/lib/db";
+import { validateRequest } from "@/lib/auth";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
+import { profiles, users } from "@/db/schema";
 
-type ProfilePatch = {
-  first_name?: string;
-  last_name?: string;
-  language?: string;
-  country?: string;
-  phone?: string;
-  email?: string; // si decides permitir cambio de email
-};
+const PatchSchema = z.object({
+  first_name: z.string().min(1).optional(),
+  last_name: z.string().min(1).optional(),
+  language: z.string().min(1).optional(),
+  country: z.string().min(1).optional(),
+  phone: z.string().min(1).optional(),
+  email: z.string().email().optional(),
+});
 
 export async function PUT(req: Request) {
   const respond = (body: unknown, init?: ResponseInit) =>
     jsonWithCors(req, body, init);
   try {
-    const token = bearerTokenFromAuthHeader(req.headers.get("authorization"));
-    if (!token) {
-      return respond({ error: "Token faltante" }, { status: 401 });
+    const { user } = await validateRequest(req);
+    if (!user) {
+      return respond({ error: "Sesión inválida" }, { status: 401 });
     }
 
-    const bodyUnknown: unknown = await req.json();
-    const patch = (bodyUnknown || {}) as ProfilePatch;
+    const patch = PatchSchema.parse(await req.json());
+    const [current] = await db
+      .select({
+        first_name: profiles.first_name,
+        last_name: profiles.last_name,
+      })
+      .from(profiles)
+      .where(eq(profiles.user_id, user.id))
+      .limit(1);
 
-    const anon = supabaseAnon();
-    const { data: auth, error: authErr } = await anon.auth.getUser(token);
-    if (authErr || !auth.user) {
-      return respond({ error: "Token inválido" }, { status: 403 });
+    const updates: Partial<typeof profiles.$inferInsert> = {};
+
+    if (patch.first_name !== undefined) {
+      updates.first_name = patch.first_name;
+    }
+    if (patch.last_name !== undefined) {
+      updates.last_name = patch.last_name;
+    }
+    if (patch.first_name !== undefined || patch.last_name !== undefined) {
+      const finalFirst = patch.first_name ?? current?.first_name ?? "";
+      const finalLast = patch.last_name ?? current?.last_name ?? "";
+      updates.display_name = `${finalFirst} ${finalLast}`.trim();
+    }
+    if (patch.language !== undefined) {
+      updates.language = patch.language;
+    }
+    if (patch.country !== undefined) {
+      updates.country = patch.country;
+    }
+    if (patch.phone !== undefined) {
+      updates.phone = patch.phone;
     }
 
-    // Usamos Service Role para actualizar metadata del usuario por id
-    const admin = supabaseAdmin();
+    const wantsEmailUpdate =
+      patch.email !== undefined && patch.email !== user.email;
 
-    // 1) Metadata (first_name, last_name, language, country, phone)
-    const newMeta = {
-      ...auth.user.user_metadata,
-      ...(patch.first_name !== undefined ? { first_name: patch.first_name } : {}),
-      ...(patch.last_name !== undefined ? { last_name: patch.last_name } : {}),
-      ...(patch.language !== undefined ? { language: patch.language } : {}),
-      ...(patch.country !== undefined ? { country: patch.country } : {}),
-      ...(patch.phone !== undefined ? { phone: patch.phone } : {}),
-    };
+    if (!Object.keys(updates).length && !wantsEmailUpdate) {
+      return respond({ error: "Sin cambios" }, { status: 400 });
+    }
 
-    // 2) Si incluyes cambio de email, manejar colisión como 409
-    const updateEmail = patch.email && patch.email !== auth.user.email;
+    if (Object.keys(updates).length) {
+      await db
+        .update(profiles)
+        .set(updates)
+        .where(eq(profiles.user_id, user.id));
+    }
 
-    const { data: upd, error: updErr } = await admin.auth.admin.updateUserById(
-      auth.user.id,
-      {
-        ...(updateEmail ? { email: patch.email } : {}),
-        user_metadata: newMeta,
-      }
-    );
+    if (wantsEmailUpdate && patch.email) {
+      const existing = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, patch.email))
+        .limit(1);
 
-    if (updErr) {
-      const msg = (updErr.message || "").toLowerCase();
-      if (updateEmail && (msg.includes("already registered") || msg.includes("exists"))) {
+      if (existing.length && existing[0].id !== user.id) {
         return respond({ error: "Email en uso" }, { status: 409 });
       }
-      return respond({ error: updErr.message }, { status: 400 });
+
+      await db
+        .update(users)
+        .set({ email: patch.email })
+        .where(eq(users.id, user.id));
+
+      await db
+        .update(profiles)
+        .set({ email: patch.email })
+        .where(eq(profiles.user_id, user.id));
     }
 
-    const u = upd?.user;
-    const md = u?.user_metadata || {};
+    const [updated] = await db
+      .select({
+        id: users.id,
+        email: users.email,
+        profile: {
+          first_name: profiles.first_name,
+          last_name: profiles.last_name,
+          language: profiles.language,
+          country: profiles.country,
+          phone: profiles.phone,
+        },
+      })
+      .from(users)
+      .leftJoin(profiles, eq(profiles.user_id, users.id))
+      .where(eq(users.id, user.id))
+      .limit(1);
+
+    if (!updated) {
+      return respond({ error: "Perfil no encontrado" }, { status: 404 });
+    }
+
     return respond({
-      id: u?.id,
-      email: u?.email,
-      first_name: md.first_name ?? null,
-      last_name: md.last_name ?? null,
-      language: md.language ?? null,
-      country: md.country ?? null,
-      phone: md.phone ?? null,
+      id: updated.id,
+      email: updated.email,
+      first_name: updated.profile?.first_name ?? null,
+      last_name: updated.profile?.last_name ?? null,
+      language: updated.profile?.language ?? null,
+      country: updated.profile?.country ?? null,
+      phone: updated.profile?.phone ?? null,
     });
   } catch (err: unknown) {
-    return respond({ error: errorMessage(err) }, { status: 500 });
+    const message = err instanceof Error ? err.message : "No se pudo actualizar";
+    return respond({ error: message }, { status: 500 });
   }
 }
 

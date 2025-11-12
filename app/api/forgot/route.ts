@@ -1,25 +1,27 @@
-// app/api/forgot/route.ts
-import { errorMessage, supabaseAnon } from "@/lib/supabase";
+import { eq } from "drizzle-orm";
+import { z } from "zod";
+import { db } from "@/lib/db";
+import { users } from "@/db/schema";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 
-type ForgotBody = { email: string };
-const isStr = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+const Body = z.object({
+  email: z.string().email(),
+});
 
 export async function POST(req: Request) {
   try {
-    const raw: unknown = await req.json();
-    const b = raw as Partial<ForgotBody>;
-    if (!isStr(b.email)) {
-      return jsonWithCors(req, { error: "Email inválido" }, { status: 400 });
-    }
+    const { email } = Body.parse(await req.json());
+    await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
 
-    const supabase = supabaseAnon();
-    // sin redirectTo → usa el SITE_URL de Auth Settings
-    await supabase.auth.resetPasswordForEmail(b.email);
-
-    return jsonWithCors(req, { sent: true }, { status: 200 });
+    // Aquí podrías generar un token y enviarlo por email.
+    return jsonWithCors(req, { sent: true }, { status: 202 });
   } catch (err: unknown) {
-    return jsonWithCors(req, { error: errorMessage(err) }, { status: 500 });
+    const message = err instanceof Error ? err.message : "No se pudo iniciar el reset";
+    return jsonWithCors(req, { error: message }, { status: 500 });
   }
 }
 
