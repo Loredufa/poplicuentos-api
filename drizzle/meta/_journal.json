@@ -22,6 +22,13 @@
       "when": 1762959000000,
       "tag": "0002_neon_lucia",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1762960000000,
+      "tag": "0003_reset_codes",
+      "breakpoints": false
     }
   ]
 }
