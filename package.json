@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@lucia-auth/adapter-drizzle": "^1.1.0",
     "@neondatabase/serverless": "^1.0.2",
     "@supabase/supabase-js": "^2.57.4",
