@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -63,3 +63,15 @@ export const passwordResetCodesRelations = relations(
     }),
   })
 );
+
+export const storyNarrations = pgTable("story_narrations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  storyId: uuid("story_id"),
+  voiceId: text("voice_id").notNull(),
+  locale: text("locale").notNull().default("es-LATAM"),
+  storyText: text("story_text").notNull(),
+  audioBase64: text("audio_base64"),
+  audioUrl: text("audio_url"),
+  durationSeconds: integer("duration_seconds"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
