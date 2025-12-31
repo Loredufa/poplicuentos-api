@@ -79,7 +79,7 @@ export async function POST(req: NextRequest) {
       model: DEFAULT_TTS_MODEL,
       voice: voiceId,
       input: cleaned,
-      format: "mp3",
+      response_format: "mp3",
     });
 
     const buffer = Buffer.from(await speech.arrayBuffer());
