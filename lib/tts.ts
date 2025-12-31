@@ -83,9 +83,6 @@ export function audioResponse(
   if (meta.durationSeconds) {
     headers["X-Audio-Duration-Estimate"] = String(meta.durationSeconds);
   }
-  const body = audioBuffer.buffer.slice(
-    audioBuffer.byteOffset,
-    audioBuffer.byteOffset + audioBuffer.byteLength
-  );
+  const body = new Uint8Array(audioBuffer);
   return new NextResponse(body, { status: 200, headers });
 }
