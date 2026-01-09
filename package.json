@@ -17,7 +17,11 @@
     "dotenv": "^17.2.3",
     "drizzle-orm": "^0.44.7",
     "lucia": "^3.2.2",
+<<<<<<< HEAD
     "next": "15.5.9",
+=======
+    "next": "15.5.7",
+>>>>>>> ca8366c (soluciono cve)
     "openai": "^4.104.0",
     "pdf-lib": "^1.17.1",
     "pg": "^8.16.3",
@@ -34,7 +38,8 @@
     "@types/react-dom": "^19",
     "drizzle-kit": "^0.31.6",
     "eslint": "^9",
-    "eslint-config-next": "15.5.0",
+    "eslint-config-next": "15.5.7",
     "typescript": "^5"
   }
 }
+
