@@ -24,29 +24,91 @@ const PAGE_WIDTH = 595.28; // A4 portrait
 const PAGE_HEIGHT = 841.89;
 const MARGIN = 40;
 const TEXT_SIZE = 16;
-const LINE_HEIGHT = 22;
+const MIN_TEXT_SIZE = 12;
+const LINE_HEIGHT_RATIO = 1.35;
+const PAGE_COUNT = 3;
+const IMAGE_BOX_WIDTH = 200;
+const IMAGE_BOX_HEIGHT = 240;
+const IMAGE_GUTTER = 14;
 
-function wrapText(
-  text: string,
-  font: any,
-  fontSize: number,
-  maxWidth: number
-): string[] {
-  const words = text.split(/\s+/).filter(Boolean);
-  const lines: string[] = [];
-  let current = "";
-  for (const word of words) {
-    const next = current ? `${current} ${word}` : word;
-    const width = font.widthOfTextAtSize(next, fontSize);
-    if (width > maxWidth && current) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = next;
+type LayoutLine = { text: string; pageIndex: number; x: number; y: number };
+
+function getLineHeight(fontSize: number) {
+  return fontSize * LINE_HEIGHT_RATIO;
+}
+
+function getPageStartY(pageIndex: number, titleBlock: number) {
+  return PAGE_HEIGHT - MARGIN - (pageIndex === 0 ? titleBlock : 0);
+}
+
+function getLineWidth(y: number, textStartY: number) {
+  const imageTop = textStartY;
+  const imageBottom = textStartY - IMAGE_BOX_HEIGHT;
+  const availableWidth = PAGE_WIDTH - MARGIN * 2;
+  const narrowWidth = availableWidth - IMAGE_BOX_WIDTH - IMAGE_GUTTER;
+  const inImageBand = y <= imageTop && y > imageBottom;
+  return inImageBand ? narrowWidth : availableWidth;
+}
+
+function layoutStoryText(opts: {
+  text: string;
+  font: any;
+  fontSize: number;
+  titleBlock: number;
+  maxPages: number;
+}) {
+  const { text, font, fontSize, titleBlock, maxPages } = opts;
+  const lineHeight = getLineHeight(fontSize);
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  const lines: LayoutLine[] = [];
+  let pageIndex = 0;
+  let textStartY = getPageStartY(pageIndex, titleBlock);
+  let y = textStartY;
+
+  const ensurePage = () => {
+    if (y - lineHeight < MARGIN) {
+      pageIndex += 1;
+      if (pageIndex >= maxPages) return false;
+      textStartY = getPageStartY(pageIndex, titleBlock);
+      y = textStartY;
     }
+    return true;
+  };
+
+  const pushLine = (line: string) => {
+    if (!line) return true;
+    const maxWidth = getLineWidth(y, textStartY);
+    if (font.widthOfTextAtSize(line, fontSize) > maxWidth) return false;
+    lines.push({ text: line, pageIndex, x: MARGIN, y });
+    y -= lineHeight;
+    return ensurePage();
+  };
+
+  for (const para of paragraphs) {
+    const words = para.split(/\s+/).filter(Boolean);
+    let current = "";
+    for (const word of words) {
+      const maxWidth = getLineWidth(y, textStartY);
+      const next = current ? `${current} ${word}` : word;
+      if (font.widthOfTextAtSize(next, fontSize) > maxWidth && current) {
+        if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+        current = word;
+      } else {
+        current = next;
+      }
+    }
+    if (current) {
+      if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+    }
+    y -= lineHeight * 0.35;
+    if (!ensurePage()) return { lines, pagesUsed: pageIndex + 1, overflow: true };
   }
-  if (current) lines.push(current);
-  return lines;
+
+  return { lines, pagesUsed: pageIndex + 1, overflow: false };
 }
 
 async function embedImage(pdf: PDFDocument, url: string) {
@@ -84,22 +146,24 @@ export async function POST(req: NextRequest) {
     }
 
     const pdf = await PDFDocument.create();
-    const page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-    const font = await pdf.embedFont(StandardFonts.HelveticaBold);
-    let y = PAGE_HEIGHT - MARGIN;
+    const pages = Array.from({ length: PAGE_COUNT }, () =>
+      pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT])
+    );
+    const titleFont = await pdf.embedFont(StandardFonts.HelveticaBold);
+    const bodyFont = await pdf.embedFont(StandardFonts.Helvetica);
 
     const availableWidth = PAGE_WIDTH - MARGIN * 2;
     const upperTitle = title.toUpperCase();
     const titleSize = 22;
-    const titleWidth = font.widthOfTextAtSize(upperTitle, titleSize);
-    page.drawText(upperTitle, {
+    const titleWidth = titleFont.widthOfTextAtSize(upperTitle, titleSize);
+    pages[0].drawText(upperTitle, {
       x: MARGIN + (availableWidth - titleWidth) / 2,
-      y,
+      y: PAGE_HEIGHT - MARGIN,
       size: titleSize,
-      font,
+      font: titleFont,
       color: rgb(0.1, 0.1, 0.1),
     });
-    y -= 32;
+    const titleBlock = 32;
 
     const paragraphs = storyText
       .split(/\n{2,}/)
@@ -108,57 +172,56 @@ export async function POST(req: NextRequest) {
       .map((p) => p.toUpperCase());
 
     if (!paragraphs.length) paragraphs.push(storyText.toUpperCase());
+    const fullText = paragraphs.join("\n\n");
 
-    // posiciones para imágenes: después del primer párrafo, mitad, último
-    const imageSlots = [0, Math.max(1, Math.floor(paragraphs.length / 2)), paragraphs.length - 1];
+    let chosenSize = TEXT_SIZE;
+    let layout = layoutStoryText({
+      text: fullText,
+      font: bodyFont,
+      fontSize: chosenSize,
+      titleBlock,
+      maxPages: PAGE_COUNT,
+    });
 
-    for (let i = 0; i < paragraphs.length; i++) {
-      const para = paragraphs[i];
-      const lines = wrapText(para, font, TEXT_SIZE, availableWidth);
-      for (const line of lines) {
-        if (y - LINE_HEIGHT < MARGIN) {
-          y = PAGE_HEIGHT - MARGIN;
-          pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-        }
-        const currentPage = pdf.getPages()[pdf.getPages().length - 1];
-        currentPage.drawText(line, {
-          x: MARGIN,
-          y,
-          size: TEXT_SIZE,
-          font,
-          color: rgb(0.1, 0.1, 0.1),
-        });
-        y -= LINE_HEIGHT;
-      }
+    while (layout.overflow && chosenSize > MIN_TEXT_SIZE) {
+      chosenSize -= 1;
+      layout = layoutStoryText({
+        text: fullText,
+        font: bodyFont,
+        fontSize: chosenSize,
+        titleBlock,
+        maxPages: PAGE_COUNT,
+      });
+    }
 
-      // Insertar imagen si corresponde al slot y hay imagen disponible
-      const slotIndex = imageSlots.indexOf(i);
-      if (slotIndex !== -1 && images[slotIndex]) {
-        const image = await embedImage(pdf, images[slotIndex]);
-        const maxImgWidth = availableWidth;
-        const maxImgHeight = 260;
-        const scale = Math.min(
-          maxImgWidth / image.width,
-          maxImgHeight / image.height
-        );
-        const imgWidth = image.width * scale;
-        const imgHeight = image.height * scale;
+    for (const line of layout.lines) {
+      pages[line.pageIndex].drawText(line.text, {
+        x: line.x,
+        y: line.y,
+        size: chosenSize,
+        font: bodyFont,
+        color: rgb(0.1, 0.1, 0.1),
+      });
+    }
 
-        if (y - imgHeight - 12 < MARGIN) {
-          y = PAGE_HEIGHT - MARGIN;
-          pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-        }
-        const currentPage = pdf.getPages()[pdf.getPages().length - 1];
-        currentPage.drawImage(image, {
-          x: MARGIN + (availableWidth - imgWidth) / 2,
-          y: y - imgHeight,
-          width: imgWidth,
-          height: imgHeight,
-        });
-        y -= imgHeight + 18;
-      }
-
-      y -= 8;
+    for (let i = 0; i < PAGE_COUNT; i++) {
+      if (!images[i]) continue;
+      const image = await embedImage(pdf, images[i]);
+      const scale = Math.min(
+        IMAGE_BOX_WIDTH / image.width,
+        IMAGE_BOX_HEIGHT / image.height
+      );
+      const imgWidth = image.width * scale;
+      const imgHeight = image.height * scale;
+      const textStartY = getPageStartY(i, titleBlock);
+      const imgX = PAGE_WIDTH - MARGIN - IMAGE_BOX_WIDTH + (IMAGE_BOX_WIDTH - imgWidth) / 2;
+      const imgY = textStartY - imgHeight;
+      pages[i].drawImage(image, {
+        x: imgX,
+        y: imgY,
+        width: imgWidth,
+        height: imgHeight,
+      });
     }
 
     const pdfBytes = await pdf.save();
