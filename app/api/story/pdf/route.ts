@@ -27,9 +27,11 @@ const TEXT_SIZE = 16;
 const MIN_TEXT_SIZE = 11;
 const LINE_HEIGHT_RATIO = 1.35;
 const PAGE_COUNT = 3;
-const IMAGE_BOX_WIDTH = 200;
-const IMAGE_BOX_HEIGHT = 240;
+const IMAGE_BOX_WIDTH = 220;
+const IMAGE_BOX_HEIGHT = 260;
 const IMAGE_GUTTER = 14;
+const TITLE_GAP = 10;
+const SUBTITLE_GAP = 12;
 
 type LayoutLine = { text: string; pageIndex: number; x: number; y: number };
 type TextBox = { pageIndex: number; x: number; yTop: number; width: number; height: number };
@@ -216,26 +218,53 @@ export async function POST(req: NextRequest) {
     const bodyFont = await pdf.embedFont(StandardFonts.Helvetica);
 
     const availableWidth = PAGE_WIDTH - MARGIN * 2;
-    const upperTitle = title.toUpperCase();
+    const displayTitle = title.trim();
     const titleSize = 22;
-    const titleWidth = titleFont.widthOfTextAtSize(upperTitle, titleSize);
-    pages[0].drawText(upperTitle, {
+    const titleWidth = titleFont.widthOfTextAtSize(displayTitle, titleSize);
+    const titleTopY = PAGE_HEIGHT - MARGIN;
+    pages[0].drawText(displayTitle, {
       x: MARGIN + (availableWidth - titleWidth) / 2,
-      y: PAGE_HEIGHT - MARGIN,
+      y: titleTopY,
       size: titleSize,
       font: titleFont,
       color: rgb(0.1, 0.1, 0.1),
     });
-    const titleBlock = titleSize + 14;
 
-    const paragraphs = storyText
+    let cleanedText = storyText.trim();
+    const firstLine = cleanedText.split(/\r?\n/)[0]?.trim() || "";
+    if (firstLine.toLowerCase() === displayTitle.toLowerCase()) {
+      cleanedText = cleanedText.replace(firstLine, "").trimStart();
+    }
+
+    let subtitle = "";
+    const metaMatch = cleanedText.match(/^\s*(META:[^\n]+)\n+/i);
+    if (metaMatch) {
+      subtitle = metaMatch[1].trim();
+      cleanedText = cleanedText.slice(metaMatch[0].length).trimStart();
+    }
+
+    if (subtitle) {
+      const subtitleSize = 11;
+      pages[0].drawText(subtitle, {
+        x: MARGIN,
+        y: titleTopY - titleSize - TITLE_GAP,
+        size: subtitleSize,
+        font: bodyFont,
+        color: rgb(0.2, 0.2, 0.2),
+      });
+    }
+
+    const titleBlock =
+      titleSize +
+      TITLE_GAP +
+      (subtitle ? 11 + SUBTITLE_GAP : 0);
+
+    const paragraphs = cleanedText
       .split(/\n{2,}/)
       .map((p) => p.trim())
-      .filter(Boolean)
-      .map((p) => p.toUpperCase());
+      .filter(Boolean);
 
-    if (!paragraphs.length) paragraphs.push(storyText.toUpperCase());
-    const fullText = paragraphs.join("\n\n");
+    const fullText = paragraphs.length ? paragraphs.join("\n\n") : cleanedText;
     const imagePages = Array.from({ length: PAGE_COUNT }, (_, i) => Boolean(images[i]));
 
     let chosenSize = TEXT_SIZE;
