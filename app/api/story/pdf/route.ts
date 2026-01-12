@@ -32,6 +32,7 @@ const IMAGE_BOX_HEIGHT = 240;
 const IMAGE_GUTTER = 14;
 
 type LayoutLine = { text: string; pageIndex: number; x: number; y: number };
+type TextBox = { pageIndex: number; x: number; yTop: number; width: number; height: number };
 
 function getLineHeight(fontSize: number) {
   return fontSize * LINE_HEIGHT_RATIO;
@@ -41,13 +42,36 @@ function getPageStartY(pageIndex: number, titleBlock: number) {
   return PAGE_HEIGHT - MARGIN - (pageIndex === 0 ? titleBlock : 0);
 }
 
-function getLineWidth(y: number, textStartY: number, hasImage: boolean) {
-  const imageTop = textStartY;
-  const imageBottom = textStartY - IMAGE_BOX_HEIGHT;
+function buildTextBoxes(titleBlock: number, imagePages: boolean[]) {
+  const boxes: TextBox[] = [];
   const availableWidth = PAGE_WIDTH - MARGIN * 2;
   const narrowWidth = availableWidth - IMAGE_BOX_WIDTH - IMAGE_GUTTER;
-  const inImageBand = y <= imageTop && y > imageBottom;
-  return inImageBand && hasImage ? narrowWidth : availableWidth;
+
+  for (let pageIndex = 0; pageIndex < PAGE_COUNT; pageIndex += 1) {
+    const textStartY = getPageStartY(pageIndex, titleBlock);
+    if (imagePages[pageIndex]) {
+      boxes.push({
+        pageIndex,
+        x: MARGIN,
+        yTop: textStartY,
+        width: narrowWidth,
+        height: IMAGE_BOX_HEIGHT,
+      });
+    }
+    const remainingTop = textStartY - (imagePages[pageIndex] ? IMAGE_BOX_HEIGHT : 0);
+    const remainingHeight = remainingTop - MARGIN;
+    if (remainingHeight > 0) {
+      boxes.push({
+        pageIndex,
+        x: MARGIN,
+        yTop: remainingTop,
+        width: availableWidth,
+        height: remainingHeight,
+      });
+    }
+  }
+
+  return boxes;
 }
 
 function splitLongWord(word: string, font: any, fontSize: number, maxWidth: number) {
@@ -71,10 +95,9 @@ function layoutStoryText(opts: {
   font: any;
   fontSize: number;
   titleBlock: number;
-  maxPages: number;
   imagePages: boolean[];
 }) {
-  const { text, font, fontSize, titleBlock, maxPages, imagePages } = opts;
+  const { text, font, fontSize, titleBlock, imagePages } = opts;
   const lineHeight = getLineHeight(fontSize);
   const paragraphGap = lineHeight * 0.6;
   const paragraphs = text
@@ -82,30 +105,34 @@ function layoutStoryText(opts: {
     .map((p) => p.trim())
     .filter(Boolean);
 
+  const boxes = buildTextBoxes(titleBlock, imagePages);
   const lines: LayoutLine[] = [];
-  let pageIndex = 0;
-  let textStartY = getPageStartY(pageIndex, titleBlock);
-  let y = textStartY;
+  let boxIndex = 0;
+  let currentBox = boxes[boxIndex];
+  let y = currentBox?.yTop ?? 0;
+  let minY = currentBox ? currentBox.yTop - currentBox.height : 0;
 
-  const nextPage = () => {
-    pageIndex += 1;
-    if (pageIndex >= maxPages) return false;
-    textStartY = getPageStartY(pageIndex, titleBlock);
-    y = textStartY;
+  const nextBox = () => {
+    boxIndex += 1;
+    if (boxIndex >= boxes.length) return false;
+    currentBox = boxes[boxIndex];
+    y = currentBox.yTop;
+    minY = currentBox.yTop - currentBox.height;
     return true;
   };
 
   const ensureSpace = () => {
-    if (y - lineHeight < MARGIN) {
-      return nextPage();
+    if (!currentBox) return false;
+    if (y - lineHeight < minY) {
+      return nextBox();
     }
     return true;
   };
 
   const pushLine = (line: string) => {
     if (!line) return true;
-    if (!ensureSpace()) return false;
-    lines.push({ text: line, pageIndex, x: MARGIN, y });
+    if (!ensureSpace() || !currentBox) return false;
+    lines.push({ text: line, pageIndex: currentBox.pageIndex, x: currentBox.x, y });
     y -= lineHeight;
     return true;
   };
@@ -114,7 +141,8 @@ function layoutStoryText(opts: {
     const words = para.split(/\s+/).filter(Boolean);
     let current = "";
     for (const word of words) {
-      const maxWidth = getLineWidth(y, textStartY, imagePages[pageIndex]);
+      if (!currentBox) return { lines, overflow: true };
+      const maxWidth = currentBox.width;
       const next = current ? `${current} ${word}` : word;
       if (font.widthOfTextAtSize(next, fontSize) <= maxWidth) {
         current = next;
@@ -131,19 +159,19 @@ function layoutStoryText(opts: {
       }
       const chunks = splitLongWord(word, font, fontSize, maxWidth);
       for (const chunk of chunks) {
-        if (!pushLine(chunk)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+        if (!pushLine(chunk)) return { lines, overflow: true };
       }
     }
     if (current) {
-      if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+      if (!pushLine(current)) return { lines, overflow: true };
     }
     y -= paragraphGap;
-    if (y < MARGIN && !nextPage()) {
-      return { lines, pagesUsed: pageIndex + 1, overflow: true };
+    while (currentBox && y < minY) {
+      if (!nextBox()) return { lines, overflow: true };
     }
   }
 
-  return { lines, pagesUsed: pageIndex + 1, overflow: false };
+  return { lines, overflow: false };
 }
 
 async function embedImage(pdf: PDFDocument, url: string) {
@@ -216,7 +244,6 @@ export async function POST(req: NextRequest) {
       font: bodyFont,
       fontSize: chosenSize,
       titleBlock,
-      maxPages: PAGE_COUNT,
       imagePages,
     });
 
@@ -227,7 +254,6 @@ export async function POST(req: NextRequest) {
         font: bodyFont,
         fontSize: chosenSize,
         titleBlock,
-        maxPages: PAGE_COUNT,
         imagePages,
       });
     }
@@ -257,8 +283,13 @@ export async function POST(req: NextRequest) {
       const imgWidth = image.width * scale;
       const imgHeight = image.height * scale;
       const textStartY = getPageStartY(i, titleBlock);
-      const imgX = PAGE_WIDTH - MARGIN - IMAGE_BOX_WIDTH + (IMAGE_BOX_WIDTH - imgWidth) / 2;
-      const imgY = textStartY - imgHeight;
+      const imgX =
+        PAGE_WIDTH -
+        MARGIN -
+        IMAGE_BOX_WIDTH +
+        (IMAGE_BOX_WIDTH - imgWidth) / 2;
+      const imgY =
+        textStartY - IMAGE_BOX_HEIGHT + (IMAGE_BOX_HEIGHT - imgHeight) / 2;
       pages[i].drawImage(image, {
         x: imgX,
         y: imgY,
