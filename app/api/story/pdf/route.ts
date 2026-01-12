@@ -24,7 +24,7 @@ const PAGE_WIDTH = 595.28; // A4 portrait
 const PAGE_HEIGHT = 841.89;
 const MARGIN = 40;
 const TEXT_SIZE = 16;
-const MIN_TEXT_SIZE = 12;
+const MIN_TEXT_SIZE = 11;
 const LINE_HEIGHT_RATIO = 1.35;
 const PAGE_COUNT = 3;
 const IMAGE_BOX_WIDTH = 200;
@@ -41,13 +41,29 @@ function getPageStartY(pageIndex: number, titleBlock: number) {
   return PAGE_HEIGHT - MARGIN - (pageIndex === 0 ? titleBlock : 0);
 }
 
-function getLineWidth(y: number, textStartY: number) {
+function getLineWidth(y: number, textStartY: number, hasImage: boolean) {
   const imageTop = textStartY;
   const imageBottom = textStartY - IMAGE_BOX_HEIGHT;
   const availableWidth = PAGE_WIDTH - MARGIN * 2;
   const narrowWidth = availableWidth - IMAGE_BOX_WIDTH - IMAGE_GUTTER;
   const inImageBand = y <= imageTop && y > imageBottom;
-  return inImageBand ? narrowWidth : availableWidth;
+  return inImageBand && hasImage ? narrowWidth : availableWidth;
+}
+
+function splitLongWord(word: string, font: any, fontSize: number, maxWidth: number) {
+  const parts: string[] = [];
+  let current = "";
+  for (const ch of word) {
+    const next = current + ch;
+    if (font.widthOfTextAtSize(next, fontSize) > maxWidth && current) {
+      parts.push(current);
+      current = ch;
+    } else {
+      current = next;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
 }
 
 function layoutStoryText(opts: {
@@ -56,9 +72,11 @@ function layoutStoryText(opts: {
   fontSize: number;
   titleBlock: number;
   maxPages: number;
+  imagePages: boolean[];
 }) {
-  const { text, font, fontSize, titleBlock, maxPages } = opts;
+  const { text, font, fontSize, titleBlock, maxPages, imagePages } = opts;
   const lineHeight = getLineHeight(fontSize);
+  const paragraphGap = lineHeight * 0.6;
   const paragraphs = text
     .split(/\n{2,}/)
     .map((p) => p.trim())
@@ -69,43 +87,60 @@ function layoutStoryText(opts: {
   let textStartY = getPageStartY(pageIndex, titleBlock);
   let y = textStartY;
 
-  const ensurePage = () => {
+  const nextPage = () => {
+    pageIndex += 1;
+    if (pageIndex >= maxPages) return false;
+    textStartY = getPageStartY(pageIndex, titleBlock);
+    y = textStartY;
+    return true;
+  };
+
+  const ensureSpace = () => {
     if (y - lineHeight < MARGIN) {
-      pageIndex += 1;
-      if (pageIndex >= maxPages) return false;
-      textStartY = getPageStartY(pageIndex, titleBlock);
-      y = textStartY;
+      return nextPage();
     }
     return true;
   };
 
   const pushLine = (line: string) => {
     if (!line) return true;
-    const maxWidth = getLineWidth(y, textStartY);
-    if (font.widthOfTextAtSize(line, fontSize) > maxWidth) return false;
+    if (!ensureSpace()) return false;
     lines.push({ text: line, pageIndex, x: MARGIN, y });
     y -= lineHeight;
-    return ensurePage();
+    return true;
   };
 
   for (const para of paragraphs) {
     const words = para.split(/\s+/).filter(Boolean);
     let current = "";
     for (const word of words) {
-      const maxWidth = getLineWidth(y, textStartY);
+      const maxWidth = getLineWidth(y, textStartY, imagePages[pageIndex]);
       const next = current ? `${current} ${word}` : word;
-      if (font.widthOfTextAtSize(next, fontSize) > maxWidth && current) {
-        if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
-        current = word;
-      } else {
+      if (font.widthOfTextAtSize(next, fontSize) <= maxWidth) {
         current = next;
+        continue;
+      }
+      if (current) {
+        if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+        current = "";
+      }
+      const wordWidth = font.widthOfTextAtSize(word, fontSize);
+      if (wordWidth <= maxWidth) {
+        current = word;
+        continue;
+      }
+      const chunks = splitLongWord(word, font, fontSize, maxWidth);
+      for (const chunk of chunks) {
+        if (!pushLine(chunk)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
       }
     }
     if (current) {
       if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
     }
-    y -= lineHeight * 0.35;
-    if (!ensurePage()) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+    y -= paragraphGap;
+    if (y < MARGIN && !nextPage()) {
+      return { lines, pagesUsed: pageIndex + 1, overflow: true };
+    }
   }
 
   return { lines, pagesUsed: pageIndex + 1, overflow: false };
@@ -163,7 +198,7 @@ export async function POST(req: NextRequest) {
       font: titleFont,
       color: rgb(0.1, 0.1, 0.1),
     });
-    const titleBlock = 32;
+    const titleBlock = titleSize + 14;
 
     const paragraphs = storyText
       .split(/\n{2,}/)
@@ -173,6 +208,7 @@ export async function POST(req: NextRequest) {
 
     if (!paragraphs.length) paragraphs.push(storyText.toUpperCase());
     const fullText = paragraphs.join("\n\n");
+    const imagePages = Array.from({ length: PAGE_COUNT }, (_, i) => Boolean(images[i]));
 
     let chosenSize = TEXT_SIZE;
     let layout = layoutStoryText({
@@ -181,6 +217,7 @@ export async function POST(req: NextRequest) {
       fontSize: chosenSize,
       titleBlock,
       maxPages: PAGE_COUNT,
+      imagePages,
     });
 
     while (layout.overflow && chosenSize > MIN_TEXT_SIZE) {
@@ -191,7 +228,13 @@ export async function POST(req: NextRequest) {
         fontSize: chosenSize,
         titleBlock,
         maxPages: PAGE_COUNT,
+        imagePages,
       });
+    }
+
+    if (layout.overflow && layout.lines.length) {
+      const last = layout.lines[layout.lines.length - 1];
+      last.text = `${last.text.replace(/[.]+$/, "")}...`;
     }
 
     for (const line of layout.lines) {
