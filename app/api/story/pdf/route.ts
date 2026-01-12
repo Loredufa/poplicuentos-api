@@ -149,7 +149,7 @@ function layoutStoryText(opts: {
         continue;
       }
       if (current) {
-        if (!pushLine(current)) return { lines, pagesUsed: pageIndex + 1, overflow: true };
+        if (!pushLine(current)) return { lines, overflow: true };
         current = "";
       }
       const wordWidth = font.widthOfTextAtSize(word, fontSize);
