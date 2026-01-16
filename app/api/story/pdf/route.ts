@@ -1,8 +1,10 @@
 export const runtime = "nodejs";
 
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 import { NextRequest } from "next/server";
+import { readFile } from "fs/promises";
+import path from "path";
 
 type PdfBody = {
   title?: string;
@@ -32,6 +34,10 @@ const IMAGE_BOX_HEIGHT = 260;
 const IMAGE_GUTTER = 14;
 const TITLE_GAP = 10;
 const SUBTITLE_GAP = 12;
+const STAMP_SIZE = 56;
+const STAMP_ROTATION = -8;
+const SHADOW_OFFSET = 6;
+const SHADOW_OPACITY = 0.22;
 
 type LayoutLine = { text: string; pageIndex: number; x: number; y: number };
 type TextBox = { pageIndex: number; x: number; yTop: number; width: number; height: number };
@@ -187,6 +193,31 @@ async function embedImage(pdf: PDFDocument, url: string) {
     : pdf.embedJpg(bytes); // fallback a JPG por simplicidad
 }
 
+async function embedLocalPng(pdf: PDFDocument, absolutePath: string) {
+  const bytes = await readFile(absolutePath);
+  return pdf.embedPng(bytes);
+}
+
+function toUpperImprint(text: string) {
+  return text.toLocaleUpperCase("es-ES");
+}
+
+async function loadStampLogo(pdf: PDFDocument) {
+  const candidates = [
+    path.resolve(process.cwd(), "logo", "logo.png"),
+    path.resolve(process.cwd(), "..", "logo", "logo.png"),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      return await embedLocalPng(pdf, candidate);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const raw = await req.json().catch(() => null);
@@ -218,7 +249,7 @@ export async function POST(req: NextRequest) {
     const bodyFont = await pdf.embedFont(StandardFonts.Helvetica);
 
     const availableWidth = PAGE_WIDTH - MARGIN * 2;
-    const displayTitle = title.trim();
+    const displayTitle = toUpperImprint(title.trim());
     const titleSize = 22;
     const titleWidth = titleFont.widthOfTextAtSize(displayTitle, titleSize);
     const titleTopY = PAGE_HEIGHT - MARGIN;
@@ -243,28 +274,32 @@ export async function POST(req: NextRequest) {
       cleanedText = cleanedText.slice(metaMatch[0].length).trimStart();
     }
 
-    if (subtitle) {
-      const subtitleSize = 11;
-      pages[0].drawText(subtitle, {
-        x: MARGIN,
-        y: titleTopY - titleSize - TITLE_GAP,
-        size: subtitleSize,
-        font: bodyFont,
-        color: rgb(0.2, 0.2, 0.2),
-      });
-    }
+    const subtitleSize = 11;
+    const imprintSubtitle = subtitle
+      ? toUpperImprint(subtitle)
+      : "BY POPLICUENTOS";
+    pages[0].drawText(imprintSubtitle, {
+      x: MARGIN,
+      y: titleTopY - titleSize - TITLE_GAP,
+      size: subtitleSize,
+      font: bodyFont,
+      color: rgb(0.2, 0.2, 0.2),
+    });
 
     const titleBlock =
       titleSize +
       TITLE_GAP +
-      (subtitle ? 11 + SUBTITLE_GAP : 0);
+      subtitleSize +
+      SUBTITLE_GAP;
 
     const paragraphs = cleanedText
       .split(/\n{2,}/)
       .map((p) => p.trim())
       .filter(Boolean);
 
-    const fullText = paragraphs.length ? paragraphs.join("\n\n") : cleanedText;
+    const fullText = toUpperImprint(
+      paragraphs.length ? paragraphs.join("\n\n") : cleanedText
+    );
     const imagePages = Array.from({ length: PAGE_COUNT }, (_, i) => Boolean(images[i]));
 
     let chosenSize = TEXT_SIZE;
@@ -319,11 +354,33 @@ export async function POST(req: NextRequest) {
         (IMAGE_BOX_WIDTH - imgWidth) / 2;
       const imgY =
         textStartY - IMAGE_BOX_HEIGHT + (IMAGE_BOX_HEIGHT - imgHeight) / 2;
+      pages[i].drawRectangle({
+        x: imgX + SHADOW_OFFSET,
+        y: imgY - SHADOW_OFFSET,
+        width: imgWidth,
+        height: imgHeight,
+        color: rgb(0, 0, 0),
+        opacity: SHADOW_OPACITY,
+      });
       pages[i].drawImage(image, {
         x: imgX,
         y: imgY,
         width: imgWidth,
         height: imgHeight,
+      });
+    }
+
+    const stamp = await loadStampLogo(pdf);
+    if (stamp) {
+      const stampScale = STAMP_SIZE / Math.max(stamp.width, stamp.height);
+      const stampWidth = stamp.width * stampScale;
+      const stampHeight = stamp.height * stampScale;
+      pages[0].drawImage(stamp, {
+        x: MARGIN - 6,
+        y: PAGE_HEIGHT - MARGIN - stampHeight + 8,
+        width: stampWidth,
+        height: stampHeight,
+        rotate: degrees(STAMP_ROTATION),
       });
     }
 
