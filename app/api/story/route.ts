@@ -95,7 +95,7 @@ function userPrompt(p: Required<Pick<StoryBody, 'age_range'>> & StoryBody): stri
 
   // --- Meta (theme, skill, characters) ---
   const meta: string[] = [];
-  if (p.theme) meta.push(`tema-vehículo (subyacente, no enunciado): ${p.theme}`);
+  if (p.theme) meta.push(`tema central (presente en la trama y los diálogos, pero SIN aparecer en el título ni enunciarse como lección explícita): ${p.theme}`);
   if (p.skill) meta.push(`habilidad (emerge por comportamiento, nunca explícita): ${p.skill}`);
   if (p.characters) meta.push(`personajes: ${p.characters}`);
 
