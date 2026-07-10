@@ -71,12 +71,20 @@ export function estimateDurationSeconds(
 export function audioResponse(
   req: Request,
   audioBuffer: Buffer,
-  meta: { storyId?: string; voiceId: string; locale?: string; durationSeconds?: number }
+  meta: {
+    storyId?: string;
+    voiceId: string;
+    locale?: string;
+    durationSeconds?: number;
+    format?: "mp3" | "wav";
+  }
 ): NextResponse {
+  const format = meta.format || "mp3";
   const headers = corsHeaders(req);
-  headers["Content-Type"] = "audio/mpeg";
+  headers["Content-Type"] = format === "wav" ? "audio/wav" : "audio/mpeg";
   headers["Content-Length"] = audioBuffer.byteLength.toString();
-  headers["Content-Disposition"] = 'inline; filename="poplicuentos-narracion.mp3"';
+  headers["Content-Disposition"] = `inline; filename="poplicuentos-narracion.${format}"`;
+  headers["X-TTS-Format"] = format;
   headers["X-TTS-Voice"] = meta.voiceId;
   if (meta.locale) headers["X-TTS-Locale"] = meta.locale;
   if (meta.storyId) headers["X-Story-Id"] = meta.storyId;
@@ -85,4 +93,76 @@ export function audioResponse(
   }
   const body = new Uint8Array(audioBuffer);
   return new NextResponse(body, { status: 200, headers });
+}
+
+export class RunPodJobError extends Error {
+  status: "FAILED" | "TIMED_OUT" | "HTTP_ERROR";
+  constructor(message: string, status: "FAILED" | "TIMED_OUT" | "HTTP_ERROR") {
+    super(message);
+    this.name = "RunPodJobError";
+    this.status = status;
+  }
+}
+
+type ChatterboxOpts = {
+  languageId?: string;
+  cfgWeight?: number;
+  exaggeration?: number;
+  waitMs?: number;
+};
+
+const RUNPOD_POLL_INTERVAL_MS = 2000;
+const RUNPOD_POLL_BUDGET_MS = 120000;
+
+export async function generateChatterboxSpeech(
+  text: string,
+  referenceAudioBuffer: Buffer,
+  opts: ChatterboxOpts = {}
+): Promise<Buffer> {
+  const apiKey = process.env.RUNPOD_API_KEY;
+  const endpointId = process.env.RUNPOD_ENDPOINT_ID;
+  if (!apiKey || !endpointId) {
+    throw new Error("RUNPOD_API_KEY o RUNPOD_ENDPOINT_ID faltantes en el backend");
+  }
+
+  const waitMs = Math.min(opts.waitMs || Number(process.env.RUNPOD_TTS_WAIT_MS) || 90000, 300000);
+  const body = {
+    input: {
+      text,
+      language_id: opts.languageId || "es",
+      voice_audio_b64: referenceAudioBuffer.toString("base64"),
+      cfg_weight: opts.cfgWeight ?? 0.5,
+      exaggeration: opts.exaggeration ?? 0.5,
+    },
+  };
+
+  const runRes = await fetch(`https://api.runpod.ai/v2/${endpointId}/runsync?wait=${waitMs}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!runRes.ok) throw new RunPodJobError(`RunPod HTTP ${runRes.status}`, "HTTP_ERROR");
+  let job = await runRes.json();
+
+  const deadline = Date.now() + RUNPOD_POLL_BUDGET_MS;
+  while (job.status === "IN_QUEUE" || job.status === "IN_PROGRESS") {
+    if (Date.now() > deadline) throw new RunPodJobError("RunPod job did not finish in time", "TIMED_OUT");
+    await new Promise((r) => setTimeout(r, RUNPOD_POLL_INTERVAL_MS));
+    const statusRes = await fetch(`https://api.runpod.ai/v2/${endpointId}/status/${job.id}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!statusRes.ok) throw new RunPodJobError(`RunPod HTTP ${statusRes.status}`, "HTTP_ERROR");
+    job = await statusRes.json();
+  }
+
+  if (job.status === "FAILED") {
+    throw new RunPodJobError(job.output?.error || job.error || "RunPod job failed", "FAILED");
+  }
+  if (job.status === "TIMED_OUT") {
+    throw new RunPodJobError("RunPod job timed out", "TIMED_OUT");
+  }
+  if (job.status !== "COMPLETED" || !job.output?.audio_wav_b64) {
+    throw new RunPodJobError("RunPod job returned no audio", "FAILED");
+  }
+  return Buffer.from(job.output.audio_wav_b64, "base64");
 }

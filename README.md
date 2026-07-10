@@ -30,21 +30,22 @@ Moraleja para el futuro (humano o IA trabajando en este repo): antes de agregar 
 
 ## Narración de voz (TTS) — `lib/tts.ts` + `app/api/tts/*`
 
-Narración con OpenAI (`gpt-4o-mini-tts`) y 3 voces fijas: `alloy`, `nova`, `shimmer`.
+Dos motores conviven en `narrate`, elegidos según si el pedido trae `reference_audio_b64`:
+
+- **Voces fijas** (`alloy`, `nova`, `shimmer`): OpenAI (`gpt-4o-mini-tts`), devuelve MP3.
+- **Voces grabadas por la familia** (mamá/papá/abuela): worker propio self-hosted en RunPod corriendo Chatterbox (`generateChatterboxSpeech` en `lib/tts.ts`), devuelve WAV. Sin terceros: el audio de referencia se manda de forma transitoria en cada narración (zero-shot, no hay clon persistente guardado en ningún servidor) — ver `poplicuentos-chatterbox-runpod/README.md` para el worker.
 
 ### Rutas disponibles
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /api/tts/voices` | Lista las 3 voces disponibles |
-| `POST /api/tts/preview` | Genera un audio corto de muestra de una voz |
-| `POST /api/tts/narrate` | Narra el texto completo de un cuento |
+| `GET /api/tts/voices` | Lista las 3 voces fijas (las voces grabadas por la familia son 100% locales al dispositivo, no pasan por este catálogo) |
+| `POST /api/tts/preview` | Genera un audio corto de muestra de una voz fija |
+| `POST /api/tts/narrate` | Narra el texto completo de un cuento. Con `reference_audio_b64` en el body, rutea a Chatterbox/RunPod (WAV); si no, a OpenAI (MP3) |
 
 ### Historial: por qué no hay ElevenLabs acá
 
-Hubo una integración completa con ElevenLabs (clonación de voz de terceros) agregada en una sesión de IA previa, sin que fuera una decisión consciente del proyecto — y sin créditos de la cuenta, fallaba en producción. Se sacó por completo (2026-07-10) porque viola la premisa de arquitectura de arriba.
-
-La clonación de voz (mamá/papá/abuela) se va a reconstruir **desde cero**, con esa premisa como punto de partida del diseño (no como algo a resolver después de implementarla).
+Hubo una integración completa con ElevenLabs (clonación de voz de terceros) agregada en una sesión de IA previa, sin que fuera una decisión consciente del proyecto — y sin créditos de la cuenta, fallaba en producción. Se sacó por completo (2026-07-10) porque viola la premisa de arquitectura de arriba, y se reemplazó por el worker propio descripto arriba.
 
 ---
 
@@ -61,4 +62,7 @@ La clonación de voz (mamá/papá/abuela) se va a reconstruir **desde cero**, co
 ```
 OPENAI_API_KEY=...
 OPENAI_TTS_MODEL=gpt-4o-mini-tts   # opcional, tiene default
+RUNPOD_API_KEY=...                 # requerido para narrar con voces grabadas por la familia
+RUNPOD_ENDPOINT_ID=...             # endpoint desplegado desde poplicuentos-chatterbox-runpod
+RUNPOD_TTS_WAIT_MS=90000           # opcional, ventana sync de /runsync
 ```
