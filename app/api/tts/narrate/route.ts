@@ -77,11 +77,10 @@ export async function POST(req: NextRequest) {
 
     const speech = await openai.audio.speech.create({
       model: DEFAULT_TTS_MODEL,
-      voice: voiceId,
+      voice: voiceId as Parameters<typeof openai.audio.speech.create>[0]['voice'],
       input: cleaned,
       response_format: "mp3",
     });
-
     const buffer = Buffer.from(await speech.arrayBuffer());
 
     return audioResponse(req, buffer, {
