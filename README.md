@@ -1,6 +1,6 @@
 # Poplicuentos API
 
-API en Next.js 15 (App Router) que sirve de backend para la app móvil **popli-54**: autenticación (Lucia), historias generadas con Gemini/OpenAI, exportación a PDF y narración de cuentos por voz (TTS).
+API en Next.js 15 (App Router) que sirve de backend para la app móvil **popli-54**: autenticación (Lucia), historias generadas con OpenAI, ilustraciones, exportación a PDF y narración de cuentos por voz (TTS).
 
 ```bash
 npm run dev
@@ -23,6 +23,7 @@ El 2026-07-10 se auditó el código y se encontraron dos cosas que violaban esta
 
 1. **Integración completa con ElevenLabs** (voz de un tercero externo) para clonar voces familiares — sin créditos en la cuenta, fallaba en producción. Se sacó por completo (código, rutas, UI en la app).
 2. **Tabla `story_narrations` en `db/schema.ts`**, con una columna `storyText` pensada para guardar el texto completo del cuento en Postgres. Nunca se llegó a usar (no había ningún `INSERT` en el código), pero era un riesgo latente — alguien podía "completarla" sin saber que rompía la arquitectura. Se borró del schema.
+3. **`app/api/illustrate-gemini`**, la ruta que la app usaba de verdad para ilustrar cuentos, mandaba el texto completo del cuento a `api.nanobananaapi.ai` — un revendedor de terceros, no Google ni OpenAI directo, a pesar del nombre. A diferencia de los dos anteriores, este no era código muerto: estaba activo en producción. Se borró la ruta y se apuntó la app a `app/api/illustrate` (que ya existía pero no se usaba), simplificado para llamar directo a OpenAI — el mismo proveedor ya usado para el texto del cuento, sin sumar un tercero nuevo.
 
 Moraleja para el futuro (humano o IA trabajando en este repo): antes de agregar cualquier tabla, ruta o integración que toque contenido generado por/para un niño, confirmar explícitamente que respeta esta premisa.
 
@@ -49,12 +50,28 @@ Hubo una integración completa con ElevenLabs (clonación de voz de terceros) ag
 
 ---
 
+## Ilustraciones — `app/api/illustrate/route.ts`
+
+Genera 1-6 imágenes por cuento con OpenAI: primero arma un plan de arte + sinopsis (`gpt-4o-mini`, para mantener personajes/escenario consistentes entre imágenes), después genera las imágenes (`gpt-image-1`, calidad `medium`). Devuelve `images: string[]` — siempre `data:image/png;base64,...` (a diferencia de `dall-e-3`, `gpt-image-1` nunca devuelve una URL). La app ya soporta base64 en todos lados: mostrarlas, guardarlas localmente, incrustarlas en el PDF.
+
+**Nota histórica**: usaba `dall-e-3`, dado de baja por OpenAI el 2026-05-12 — se migró a `gpt-image-1` (verificado contra la doc oficial de OpenAI y el SDK instalado `openai@4.104.0`, que todavía no tipa `gpt-image-2`/`gpt-image-1-mini`).
+
+Único proveedor: OpenAI, el mismo ya usado para el texto del cuento — no hay una integración de Google/Gemini funcional acá (el SDK instalado no soporta generación de imágenes; ver historial arriba).
+
+### Rutas disponibles
+
+| Ruta | Qué hace |
+|---|---|
+| `POST /api/illustrate` | Genera las ilustraciones de un cuento (OpenAI DALL-E-3) |
+| `POST /api/story/pdf` | Arma el PDF del cuento con las imágenes ya generadas |
+
+---
+
 ## Otras piezas del backend
 
 - `db/` — esquema Drizzle + conexión Postgres (Neon)
 - `lib/auth/` — autenticación con Lucia
-- `app/api/story/` — generación de cuentos (Gemini/OpenAI)
-- `app/api/illustrate*` — ilustraciones
+- `app/api/story/` — generación de cuentos (OpenAI)
 - `lib/email-templates` — emails transaccionales
 
 ## Variables de entorno relevantes para TTS

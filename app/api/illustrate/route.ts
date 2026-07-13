@@ -1,13 +1,12 @@
 export const runtime = 'nodejs';
 
 import { jsonWithCors, optionsResponse } from '@/lib/cors';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import OpenAI from 'openai';
 import { NextRequest } from 'next/server';
 
 // ---------- Tipos ----------
 type AgeRange = '2-5' | '6-10';
-type GoogleAspectRatio = '1:1' | '9:16' | '16:9' | '3:4' | '4:3';
+type ImageAspectRatio = '1:1' | '9:16' | '16:9' | '3:4' | '4:3';
 
 interface IllustrateBody {
   story: string;
@@ -15,7 +14,7 @@ interface IllustrateBody {
   tone?: string;
   num_images?: number;
   aspect_ratio?: string;
-  size?: string; // kept for backwards compatibility, ignored by Google Imagen
+  size?: string; // kept for backwards compatibility, ignored (aspect_ratio is used instead)
 }
 
 // ---------- Utils de tipado ----------
@@ -32,7 +31,6 @@ function isIllustrateBody(x: unknown): x is IllustrateBody {
 }
 
 // ---------- Helpers ----------
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || '');
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 interface IllustrationPlan {
@@ -60,7 +58,7 @@ function parseJsonLoose<T>(text: string): T | null {
   return null;
 }
 
-async function safeSynopsisWithGemini(
+async function safeSynopsisWithOpenAI(
   story: string,
   age: AgeRange,
   tone: string,
@@ -90,7 +88,7 @@ async function safeSynopsisWithGemini(
   }
 }
 
-async function generatePlanWithGemini(
+async function generatePlanWithOpenAI(
   story: string,
   age: AgeRange,
   tone: string,
@@ -148,9 +146,9 @@ function promptsFromPlan(plan: IllustrationPlan, synopsis: string): string[] {
   ];
 }
 
-async function generatePromptsWithGemini(story: string, age: AgeRange, tone: string): Promise<string[]> {
-  const synopsis = await safeSynopsisWithGemini(story, age, tone);
-  const plan = await generatePlanWithGemini(story, age, tone);
+async function generatePromptsWithOpenAI(story: string, age: AgeRange, tone: string): Promise<string[]> {
+  const synopsis = await safeSynopsisWithOpenAI(story, age, tone);
+  const plan = await generatePlanWithOpenAI(story, age, tone);
   if (plan) {
     return promptsFromPlan(plan, synopsis);
   }
@@ -164,7 +162,7 @@ async function generatePromptsWithGemini(story: string, age: AgeRange, tone: str
 }
 
 function fallbackPrompts(story: string, age: AgeRange, tone: string) {
-    // Fallback if Gemini fails
+    // Fallback if prompt/plan generation fails
     const base = `Children's book illustration, age ${age}, tone ${tone}. Maintain SAME characters and setting across all images. Do NOT draw text, letters, or words. Safe, wholesome, no violence or harm. Story context: ${safeStorySnippet(story)}.`;
     return [
         `${base} Scene from the beginning: ${story.slice(0, 100)}...`,
@@ -173,7 +171,7 @@ function fallbackPrompts(story: string, age: AgeRange, tone: string) {
     ];
 }
 
-function normalizeAspectRatio(ar?: string): GoogleAspectRatio {
+function normalizeAspectRatio(ar?: string): ImageAspectRatio {
   switch ((ar || '').toLowerCase()) {
     case '9:16':
     case 'portrait':
@@ -190,96 +188,32 @@ function normalizeAspectRatio(ar?: string): GoogleAspectRatio {
   }
 }
 
-function extractGoogleImageBase64(result: any): string {
-  const candidate = Array.isArray(result?.response?.candidates)
-    ? result.response.candidates[0]
-    : undefined;
-  const inlinePart = candidate?.content?.parts?.find((part: any) => part?.inlineData)?.inlineData;
-  const image =
-    result?.response?.image ||
-    result?.response?.images?.[0] ||
-    candidate?.image;
-
-  const data =
-    image?.data ||
-    image?.inlineData?.data ||
-    image?.base64Data ||
-    inlinePart?.data;
-  const mimeType = image?.mimeType || image?.inlineData?.mimeType || inlinePart?.mimeType || 'image/png';
-  return data ? `data:${mimeType};base64,${data}` : '';
-}
-
-async function generateImagesWithGoogle(
-  prompts: string[],
-  aspectRatio: GoogleAspectRatio,
-) {
-  const model: any = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-  const canGenerateImage = typeof model.generateImage === 'function';
-  const canGenerateImages = typeof model.generateImages === 'function';
-
-  if (!canGenerateImage && !canGenerateImages) {
-    return { images: [] as string[], errors: ['Image generation is not available in the current SDK version'] };
-  }
-
-  const errors: string[] = [];
-  const images = await Promise.all(
-    prompts.map(async (prompt) => {
-      const baseRequest: any = { prompt: cleanForPrompt(prompt).slice(0, 600) };
-      if (aspectRatio) baseRequest.aspectRatio = aspectRatio;
-
-      const runGeneration = (req: any) =>
-        canGenerateImage
-          ? model.generateImage(req)
-          : model.generateImages({ ...req, numberOfImages: 1 });
-
-      try {
-        const result = await runGeneration(baseRequest);
-        const image = extractGoogleImageBase64(result);
-        if (image) return image;
-        throw new Error('Empty image data returned from Google');
-      } catch (err) {
-        console.error('Google image gen failed for prompt:', prompt, err);
-        errors.push((err as Error)?.message || 'Google image gen failed');
-        // Retry once with a safer, shorter prompt to bypass content filter.
-        const saferPrompt = `${cleanForPrompt(prompt).slice(0, 400)}. Safe, wholesome, kind, educational, no violence.`;
-        try {
-          const retry = await runGeneration({ ...baseRequest, prompt: saferPrompt });
-          const image = extractGoogleImageBase64(retry);
-          if (image) return image;
-          errors.push('Retry failed: empty image data returned');
-          return '';
-        } catch (err2) {
-          console.error('Retry also failed for prompt:', saferPrompt, err2);
-          errors.push((err2 as Error)?.message || 'Retry failed');
-          return '';
-        }
-      }
-      }),
-  );
-
-  return { images: images.filter((img) => img.length > 0), errors };
-}
-
-async function generateImagesFallbackOpenAI(prompts: string[], aspectRatio: GoogleAspectRatio) {
+async function generateImagesWithOpenAI(prompts: string[], aspectRatio: ImageAspectRatio) {
   if (!openai.apiKey) return { images: [], errors: ['OPENAI_API_KEY missing'] };
-  const size = aspectRatio === '9:16' ? '1024x1792'
-    : aspectRatio === '16:9' ? '1792x1024'
-    : aspectRatio === '3:4' ? '1024x1792'
-    : aspectRatio === '4:3' ? '1792x1024'
+  // dall-e-3 fue dado de baja por OpenAI el 2026-05-12; gpt-image-1 es el
+  // reemplazo (junto con gpt-image-2/gpt-image-1-mini, no soportados por el
+  // SDK instalado @openai/openai@4.104.0 todavía). A diferencia de dall-e-3,
+  // gpt-image-1 siempre devuelve base64 (b64_json), nunca una url.
+  const size = aspectRatio === '9:16' ? '1024x1536'
+    : aspectRatio === '16:9' ? '1536x1024'
+    : aspectRatio === '3:4' ? '1024x1536'
+    : aspectRatio === '4:3' ? '1536x1024'
     : '1024x1024';
   const errors: string[] = [];
   const images = await Promise.all(
     prompts.map(async (prompt) => {
       try {
         const res = await openai.images.generate({
-          model: 'dall-e-3',
+          model: 'gpt-image-1',
           prompt: cleanForPrompt(prompt),
           size,
+          quality: 'medium',
           n: 1,
         });
-        return res.data?.[0]?.url || '';
+        const b64 = res.data?.[0]?.b64_json;
+        return b64 ? `data:image/png;base64,${b64}` : '';
       } catch (err) {
-        console.error('OpenAI image fallback failed for prompt:', prompt, err);
+        console.error('OpenAI image generation failed for prompt:', prompt, err);
         errors.push((err as Error)?.message || 'OpenAI image gen failed');
         return '';
       }
@@ -310,18 +244,18 @@ export async function POST(req: NextRequest) {
       size,
     } = parsed;
 
-    if (!process.env.GOOGLE_API_KEY) {
-      return jsonWithCors(req, { error: 'GOOGLE_API_KEY missing' }, { status: 500 });
+    if (!openai.apiKey) {
+      return jsonWithCors(req, { error: 'OPENAI_API_KEY missing' }, { status: 500 });
     }
 
-    // 1. Generate Prompts with Gemini
-    let prompts = await generatePromptsWithGemini(story, age_range, tone);
-    
+    // 1. Generate Prompts with OpenAI (síntesis + plan de arte, texto del cuento nunca sale del proveedor ya usado para generar la historia)
+    let prompts = await generatePromptsWithOpenAI(story, age_range, tone);
+
     if (prompts.length === 0) {
         prompts = fallbackPrompts(story, age_range, tone);
     }
 
-    // 2. Generate Images with Google Imagen
+    // 2. Generate Images with OpenAI (DALL-E-3)
     const finalAspectRatio = normalizeAspectRatio(aspect_ratio || size);
     const requestedImages = Math.max(1, Math.min(num_images, 6));
     const promptsToUse = prompts.slice(0, requestedImages);
@@ -329,20 +263,7 @@ export async function POST(req: NextRequest) {
       promptsToUse.push(prompts[promptsToUse.length % prompts.length]);
     }
 
-    const { images: googleImages, errors: googleErrors } = await generateImagesWithGoogle(promptsToUse, finalAspectRatio);
-
-    let provider = 'google:gemini-1.5-flash:generateImage';
-    let finalImages = googleImages;
-    let generationErrors = googleErrors;
-
-    if (!finalImages.length) {
-      const fallback = await generateImagesFallbackOpenAI(promptsToUse, finalAspectRatio);
-      if (fallback.images.length) {
-        provider = 'openai:dall-e-3-fallback';
-        finalImages = fallback.images;
-      }
-      generationErrors = generationErrors.concat(fallback.errors);
-    }
+    const { images: finalImages, errors: generationErrors } = await generateImagesWithOpenAI(promptsToUse, finalAspectRatio);
 
     if (!finalImages.length) {
       return jsonWithCors(req, { error: 'No images returned', details: generationErrors }, { status: 502 });
@@ -351,7 +272,7 @@ export async function POST(req: NextRequest) {
     return jsonWithCors(
       req,
       {
-        provider,
+        provider: 'openai:gpt-image-1',
         aspect_ratio: finalAspectRatio,
         images: finalImages,
         errors: generationErrors,
