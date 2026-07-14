@@ -299,9 +299,12 @@ export async function POST(req: NextRequest) {
     // 1. Generate Prompts with OpenAI (síntesis + plan de arte, texto del cuento nunca sale del proveedor ya usado para generar la historia)
     // Si vienen `plan`/`synopsis` ya generados en una llamada anterior de la misma sesión de ilustración, se
     // reutilizan en vez de volver a llamar a OpenAI (stateless: van y vuelven en el body, no se persisten server-side).
-    let { prompts, plan: finalPlan, synopsis: finalSynopsis } = await generatePromptsWithOpenAI(
+    const promptsResult = await generatePromptsWithOpenAI(
       story, age_range, tone, characters, incomingPlan, incomingSynopsis,
     );
+    let prompts = promptsResult.prompts;
+    const finalPlan = promptsResult.plan;
+    const finalSynopsis = promptsResult.synopsis;
 
     if (prompts.length === 0) {
         prompts = fallbackPrompts(story, age_range, tone);
