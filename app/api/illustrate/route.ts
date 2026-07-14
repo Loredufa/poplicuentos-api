@@ -7,6 +7,16 @@ import { NextRequest } from 'next/server';
 // ---------- Tipos ----------
 type AgeRange = '2-5' | '6-10';
 type ImageAspectRatio = '1:1' | '9:16' | '16:9' | '3:4' | '4:3';
+type SceneIndex = 'intro' | 'middle' | 'end';
+const SCENE_ORDER: SceneIndex[] = ['intro', 'middle', 'end'];
+
+interface IllustrationPlan {
+  characters: Array<{ name: string; description: string }>;
+  setting: string;
+  palette: string;
+  style: string;
+  scenes: { intro: string; middle: string; end: string };
+}
 
 interface IllustrateBody {
   story: string;
@@ -15,6 +25,10 @@ interface IllustrateBody {
   num_images?: number;
   aspect_ratio?: string;
   size?: string; // kept for backwards compatibility, ignored (aspect_ratio is used instead)
+  characters?: string; // descripción del protagonista escrita por el usuario
+  scene_index?: SceneIndex; // qué escena pedir; si no viene, se usa el comportamiento legacy (slice)
+  plan?: IllustrationPlan; // plan ya generado en una llamada previa, para reusar sin volver a llamar a OpenAI
+  synopsis?: string; // sinopsis ya generada en una llamada previa, para reusar sin volver a llamar a OpenAI
 }
 
 // ---------- Utils de tipado ----------
@@ -24,22 +38,37 @@ function isString(x: unknown): x is string {
 function isAgeRange(x: unknown): x is AgeRange {
   return x === '2-5' || x === '6-10';
 }
+function isSceneIndex(x: unknown): x is SceneIndex {
+  return x === 'intro' || x === 'middle' || x === 'end';
+}
+function isIllustrationPlan(x: unknown): x is IllustrationPlan {
+  if (typeof x !== 'object' || x === null) return false;
+  const r = x as Record<string, unknown>;
+  const scenes = r.scenes as Record<string, unknown> | undefined;
+  return (
+    Array.isArray(r.characters) &&
+    typeof r.setting === 'string' &&
+    typeof r.palette === 'string' &&
+    typeof r.style === 'string' &&
+    typeof scenes === 'object' &&
+    scenes !== null &&
+    typeof scenes.intro === 'string' &&
+    typeof scenes.middle === 'string' &&
+    typeof scenes.end === 'string'
+  );
+}
 function isIllustrateBody(x: unknown): x is IllustrateBody {
   if (typeof x !== 'object' || x === null) return false;
   const r = x as Record<string, unknown>;
-  return isString(r.story) && isAgeRange(r.age_range);
+  if (!isString(r.story) || !isAgeRange(r.age_range)) return false;
+  if (r.scene_index !== undefined && !isSceneIndex(r.scene_index)) return false;
+  if (r.plan !== undefined && !isIllustrationPlan(r.plan)) return false;
+  if (r.synopsis !== undefined && !isString(r.synopsis)) return false;
+  return true;
 }
 
 // ---------- Helpers ----------
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-interface IllustrationPlan {
-  characters: Array<{ name: string; description: string }>;
-  setting: string;
-  palette: string;
-  style: string;
-  scenes: { intro: string; middle: string; end: string };
-}
 
 function safeStorySnippet(story: string, maxLen = 400): string {
   return story.replace(/[*_`>#~]/g, '').replace(/\s+/g, ' ').slice(0, maxLen);
@@ -92,9 +121,13 @@ async function generatePlanWithOpenAI(
   story: string,
   age: AgeRange,
   tone: string,
+  characters?: string,
 ): Promise<IllustrationPlan | null> {
   try {
     if (!openai.apiKey) throw new Error('OPENAI_API_KEY missing');
+    const characterInstruction = characters
+      ? `Main character (fixed, MUST be honored exactly, do not invent a different one): ${cleanForPrompt(characters).slice(0, 300)}. `
+      : '';
     const result = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
@@ -104,7 +137,7 @@ async function generatePlanWithOpenAI(
         },
         {
           role: 'user',
-          content: `Age: ${age}. Tone: ${tone}. Story (truncated 2000 chars): ${story.slice(0, 2000)}. Return JSON with keys: characters (array of {name, description}), setting, palette, style, scenes {intro, middle, end}. Do NOT wrap in markdown.`,
+          content: `Age: ${age}. Tone: ${tone}. ${characterInstruction}Story (truncated 2000 chars): ${story.slice(0, 2000)}. Return JSON with keys: characters (array of {name, description}), setting, palette, style, scenes {intro, middle, end}. Do NOT wrap in markdown.`,
         },
       ],
       max_tokens: 400,
@@ -118,12 +151,9 @@ async function generatePlanWithOpenAI(
     const text = (rawContent || '').replace(/```json/gi, '').replace(/```/g, '').trim();
     const parsed = parseJsonLoose<IllustrationPlan>(text);
 
-    if (
-      parsed &&
-      Array.isArray(parsed.characters) &&
-      parsed.characters.length > 0 &&
-      parsed.scenes
-    ) {
+    // Usa el mismo validador que el round-trip del `plan` en el request (isIllustrationPlan): si un plan no
+    // pasa acá, tampoco pasaría al reenviarse en las llamadas 2/3, así que no tiene sentido devolverlo.
+    if (parsed && isIllustrationPlan(parsed) && parsed.characters.length > 0) {
       return parsed;
     }
     return null;
@@ -146,19 +176,33 @@ function promptsFromPlan(plan: IllustrationPlan, synopsis: string): string[] {
   ];
 }
 
-async function generatePromptsWithOpenAI(story: string, age: AgeRange, tone: string): Promise<string[]> {
-  const synopsis = await safeSynopsisWithOpenAI(story, age, tone);
-  const plan = await generatePlanWithOpenAI(story, age, tone);
+async function generatePromptsWithOpenAI(
+  story: string,
+  age: AgeRange,
+  tone: string,
+  characters?: string,
+  existingPlan?: IllustrationPlan,
+  existingSynopsis?: string,
+): Promise<{ prompts: string[]; plan: IllustrationPlan | null; synopsis: string }> {
+  // Reusar la sinopsis de una llamada previa evita 2 llamadas extra a OpenAI por ilustración y, ya que
+  // safeSynopsisWithOpenAI no es determinística (temperature 0.5), evita que cada escena describa el
+  // cuento con palabras ligeramente distintas.
+  const synopsis = existingSynopsis ?? await safeSynopsisWithOpenAI(story, age, tone);
+  const plan = existingPlan ?? await generatePlanWithOpenAI(story, age, tone, characters);
   if (plan) {
-    return promptsFromPlan(plan, synopsis);
+    return { prompts: promptsFromPlan(plan, synopsis), plan, synopsis };
   }
   // If plan failed, still return a simple consistent prompt set using the synopsis
   const base = `Children's book illustration, age ${age}, tone ${tone}. Maintain SAME characters and setting across all images. Do NOT draw text, letters, or words. Safe, wholesome, no violence or harm. Story context: ${synopsis}.`;
-  return [
-    `${base} Scene from the beginning.`,
-    `${base} Scene from the middle.`,
-    `${base} Scene from the end.`,
-  ];
+  return {
+    prompts: [
+      `${base} Scene from the beginning.`,
+      `${base} Scene from the middle.`,
+      `${base} Scene from the end.`,
+    ],
+    plan: null,
+    synopsis,
+  };
 }
 
 function fallbackPrompts(story: string, age: AgeRange, tone: string) {
@@ -242,6 +286,10 @@ export async function POST(req: NextRequest) {
       num_images = 3,
       aspect_ratio,
       size,
+      characters,
+      scene_index,
+      plan: incomingPlan,
+      synopsis: incomingSynopsis,
     } = parsed;
 
     if (!openai.apiKey) {
@@ -249,18 +297,31 @@ export async function POST(req: NextRequest) {
     }
 
     // 1. Generate Prompts with OpenAI (síntesis + plan de arte, texto del cuento nunca sale del proveedor ya usado para generar la historia)
-    let prompts = await generatePromptsWithOpenAI(story, age_range, tone);
+    // Si vienen `plan`/`synopsis` ya generados en una llamada anterior de la misma sesión de ilustración, se
+    // reutilizan en vez de volver a llamar a OpenAI (stateless: van y vuelven en el body, no se persisten server-side).
+    let { prompts, plan: finalPlan, synopsis: finalSynopsis } = await generatePromptsWithOpenAI(
+      story, age_range, tone, characters, incomingPlan, incomingSynopsis,
+    );
 
     if (prompts.length === 0) {
         prompts = fallbackPrompts(story, age_range, tone);
     }
 
-    // 2. Generate Images with OpenAI (DALL-E-3)
+    // 2. Generate Images with OpenAI (gpt-image-1)
     const finalAspectRatio = normalizeAspectRatio(aspect_ratio || size);
-    const requestedImages = Math.max(1, Math.min(num_images, 6));
-    const promptsToUse = prompts.slice(0, requestedImages);
-    while (promptsToUse.length < requestedImages) {
-      promptsToUse.push(prompts[promptsToUse.length % prompts.length]);
+
+    let promptsToUse: string[];
+    if (scene_index) {
+      // El cliente pidió una escena específica: usar ese prompt exacto en vez de siempre el primero.
+      const idx = SCENE_ORDER.indexOf(scene_index);
+      promptsToUse = [prompts[idx] ?? prompts[0]];
+    } else {
+      // Comportamiento legacy (clientes que no mandan scene_index): tomar los primeros N prompts.
+      const requestedImages = Math.max(1, Math.min(num_images, 6));
+      promptsToUse = prompts.slice(0, requestedImages);
+      while (promptsToUse.length < requestedImages) {
+        promptsToUse.push(prompts[promptsToUse.length % prompts.length]);
+      }
     }
 
     const { images: finalImages, errors: generationErrors } = await generateImagesWithOpenAI(promptsToUse, finalAspectRatio);
@@ -276,6 +337,8 @@ export async function POST(req: NextRequest) {
         aspect_ratio: finalAspectRatio,
         images: finalImages,
         errors: generationErrors,
+        plan: finalPlan,
+        synopsis: finalSynopsis,
       },
       { status: 200 },
     );
