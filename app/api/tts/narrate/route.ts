@@ -1,4 +1,8 @@
 export const runtime = "nodejs";
+// Narrar con voz grabada implica esperar a RunPod: arranque en frio del worker (~80s)
+// mas una llamada al modelo por cada pedazo del cuento (~12 en un cuento de 4 minutos).
+// Con el default de Vercel la funcion se cortaba antes de que el worker contestara.
+export const maxDuration = 300;
 
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 import {

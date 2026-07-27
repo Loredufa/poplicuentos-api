@@ -112,7 +112,12 @@ type ChatterboxOpts = {
 };
 
 const RUNPOD_POLL_INTERVAL_MS = 2000;
-const RUNPOD_POLL_BUDGET_MS = 120000;
+// El worker trocea el cuento y genera un pedazo por vez (ver handler.py): un cuento de
+// 4 minutos son ~12 llamadas al modelo, ~180s, mas hasta ~80s de arranque en frio del
+// worker. Con el presupuesto viejo de 120s se cortaba antes de que RunPod terminara.
+// El tope de arriba lo pone Vercel: maxDuration de la ruta (300s), asi que dejamos
+// margen para devolver la respuesta.
+const RUNPOD_POLL_BUDGET_MS = Number(process.env.RUNPOD_POLL_BUDGET_MS) || 280000;
 
 export async function generateChatterboxSpeech(
   text: string,
