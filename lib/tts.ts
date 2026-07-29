@@ -119,6 +119,20 @@ const RUNPOD_POLL_INTERVAL_MS = 2000;
 // margen para devolver la respuesta.
 const RUNPOD_POLL_BUDGET_MS = Number(process.env.RUNPOD_POLL_BUDGET_MS) || 280000;
 
+// cfg_weight es el peso de classifier-free guidance de Chatterbox: cuanto empuja la
+// generacion hacia el prior aprendido del modelo en vez de hacia la voz de referencia.
+// Mas alto = mas inteligible pero mas NEUTRO. En 0.5 el acento rioplatense se perdia y la
+// narracion salia en espanol neutro; 0.3 devuelve prosodia y acento del hablante a costa
+// de algo de diccion.
+//
+// Se puede tocar por env porque es el numero que hay que barrer para calibrar el acento
+// (0.2 = maximo acento, 0.5 = maxima diccion) y no da para redeployar por cada prueba.
+// No se usa el idioma `Number(x) || default` de arriba a proposito: comeria un 0 legitimo
+// (0 = sin guidance) y falsearia el experimento.
+const rawCfgWeight = process.env.CHATTERBOX_CFG_WEIGHT?.trim();
+const parsedCfgWeight = rawCfgWeight ? Number(rawCfgWeight) : NaN;
+const CHATTERBOX_CFG_WEIGHT = Number.isFinite(parsedCfgWeight) ? parsedCfgWeight : 0.3;
+
 export async function generateChatterboxSpeech(
   text: string,
   referenceAudioBuffer: Buffer,
@@ -136,7 +150,7 @@ export async function generateChatterboxSpeech(
       text,
       language_id: opts.languageId || "es",
       voice_audio_b64: referenceAudioBuffer.toString("base64"),
-      cfg_weight: opts.cfgWeight ?? 0.5,
+      cfg_weight: opts.cfgWeight ?? CHATTERBOX_CFG_WEIGHT,
       exaggeration: opts.exaggeration ?? 0.5,
     },
   };
