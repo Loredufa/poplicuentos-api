@@ -12,7 +12,7 @@ import {
   cleanStoryText,
   estimateDurationSeconds,
   resolveVoiceId,
-  generateChatterboxSpeech,
+  generateClonedSpeech,
   RunPodJobError,
 } from "@/lib/tts";
 import OpenAI from "openai";
@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
       }
       try {
         const referenceBuffer = Buffer.from(rawBody.reference_audio_b64, "base64");
-        const buffer = await generateChatterboxSpeech(cleaned, referenceBuffer, {
+        const buffer = await generateClonedSpeech(cleaned, referenceBuffer, {
           languageId: (locale.split("-")[0] || "es").toLowerCase(),
         });
         return audioResponse(req, buffer, {

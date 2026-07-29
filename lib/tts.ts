@@ -104,39 +104,43 @@ export class RunPodJobError extends Error {
   }
 }
 
-type ChatterboxOpts = {
+type ClonedSpeechOpts = {
   languageId?: string;
-  cfgWeight?: number;
-  exaggeration?: number;
+  /**
+   * Transcripción del audio de referencia. CosyVoice arma el contexto con los tokens del
+   * audio MÁS su transcripción, así que necesita saber qué se dice ahí. Si no se manda, el
+   * worker lo transcribe con faster-whisper — que es el caso normal, porque a quien graba
+   * se le pide que CUENTE el guion, no que lo lea palabra por palabra.
+   */
+  referenceText?: string;
   waitMs?: number;
 };
 
 const RUNPOD_POLL_INTERVAL_MS = 2000;
 // El worker trocea el cuento y genera un pedazo por vez (ver handler.py): un cuento de
-// 4 minutos son ~12 llamadas al modelo, ~180s, mas hasta ~80s de arranque en frio del
-// worker. Con el presupuesto viejo de 120s se cortaba antes de que RunPod terminara.
+// 4 minutos son ~12 llamadas al modelo, mas el arranque en frio del worker. Con el
+// presupuesto viejo de 120s se cortaba antes de que RunPod terminara.
 // El tope de arriba lo pone Vercel: maxDuration de la ruta (300s), asi que dejamos
 // margen para devolver la respuesta.
+//
+// Ojo al cambiar de modelo: este presupuesto se calibro con Chatterbox. CosyVoice tiene
+// otro perfil de latencia (los pesos ahora vienen horneados en la imagen, asi que el
+// arranque en frio deberia bajar, pero se suma el ASR de la referencia). Cronometrar un
+// cuento largo real antes de darlo por bueno.
 const RUNPOD_POLL_BUDGET_MS = Number(process.env.RUNPOD_POLL_BUDGET_MS) || 280000;
 
-// cfg_weight es el peso de classifier-free guidance de Chatterbox: cuanto empuja la
-// generacion hacia el prior aprendido del modelo en vez de hacia la voz de referencia.
-// Mas alto = mas inteligible pero mas NEUTRO. En 0.5 el acento rioplatense se perdia y la
-// narracion salia en espanol neutro; 0.3 devuelve prosodia y acento del hablante a costa
-// de algo de diccion.
-//
-// Se puede tocar por env porque es el numero que hay que barrer para calibrar el acento
-// (0.2 = maximo acento, 0.5 = maxima diccion) y no da para redeployar por cada prueba.
-// No se usa el idioma `Number(x) || default` de arriba a proposito: comeria un 0 legitimo
-// (0 = sin guidance) y falsearia el experimento.
-const rawCfgWeight = process.env.CHATTERBOX_CFG_WEIGHT?.trim();
-const parsedCfgWeight = rawCfgWeight ? Number(rawCfgWeight) : NaN;
-const CHATTERBOX_CFG_WEIGHT = Number.isFinite(parsedCfgWeight) ? parsedCfgWeight : 0.3;
-
-export async function generateChatterboxSpeech(
+/**
+ * Narra `text` con la voz de `referenceAudioBuffer`, contra el worker de RunPod.
+ *
+ * El worker corría Chatterbox y ahora corre CosyVoice. Con Chatterbox había que mandarle
+ * `cfg_weight` y `exaggeration`; se sacaron porque son perillas de aquel modelo y no
+ * existen en este. Tampoco se reemplazaron por las de CosyVoice: el troceado, la ventana de
+ * referencia y el ASR los decide el worker, que es donde está el contexto para hacerlo.
+ */
+export async function generateClonedSpeech(
   text: string,
   referenceAudioBuffer: Buffer,
-  opts: ChatterboxOpts = {}
+  opts: ClonedSpeechOpts = {}
 ): Promise<Buffer> {
   const apiKey = process.env.RUNPOD_API_KEY;
   const endpointId = process.env.RUNPOD_ENDPOINT_ID;
@@ -150,8 +154,7 @@ export async function generateChatterboxSpeech(
       text,
       language_id: opts.languageId || "es",
       voice_audio_b64: referenceAudioBuffer.toString("base64"),
-      cfg_weight: opts.cfgWeight ?? CHATTERBOX_CFG_WEIGHT,
-      exaggeration: opts.exaggeration ?? 0.5,
+      ...(opts.referenceText ? { reference_text: opts.referenceText } : {}),
     },
   };
 
