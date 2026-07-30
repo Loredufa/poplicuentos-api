@@ -148,6 +148,13 @@ export async function generateClonedSpeech(
     throw new Error("RUNPOD_API_KEY o RUNPOD_ENDPOINT_ID faltantes en el backend");
   }
 
+  // El presupuesto se cuenta desde ACA, antes del primer fetch, y no despues de que vuelve.
+  // Antes se calculaba recien al entrar al loop de polling, o sea despues de un runsync que
+  // puede tardar hasta `waitMs` (90s): el techo real quedaba en 90 + 280 = 370s, por encima
+  // del maxDuration de 300s de Vercel. Resultado: Vercel cortaba primero y el usuario veia
+  // un 504 crudo en vez del mensaje de "el servidor de voz tardo demasiado".
+  const deadline = Date.now() + RUNPOD_POLL_BUDGET_MS;
+
   const waitMs = Math.min(opts.waitMs || Number(process.env.RUNPOD_TTS_WAIT_MS) || 90000, 300000);
   const body = {
     input: {
@@ -166,7 +173,6 @@ export async function generateClonedSpeech(
   if (!runRes.ok) throw new RunPodJobError(`RunPod HTTP ${runRes.status}`, "HTTP_ERROR");
   let job = await runRes.json();
 
-  const deadline = Date.now() + RUNPOD_POLL_BUDGET_MS;
   while (job.status === "IN_QUEUE" || job.status === "IN_PROGRESS") {
     if (Date.now() > deadline) throw new RunPodJobError("RunPod job did not finish in time", "TIMED_OUT");
     await new Promise((r) => setTimeout(r, RUNPOD_POLL_INTERVAL_MS));
