@@ -36,6 +36,33 @@ Dos motores conviven en `narrate`, elegidos según si el pedido trae `reference_
 - **Voces fijas** (`alloy`, `nova`, `shimmer`): OpenAI (`gpt-4o-mini-tts`), devuelve MP3.
 - **Voces grabadas por la familia** (mamá/papá/abuela): worker propio self-hosted en RunPod corriendo Chatterbox (`generateChatterboxSpeech` en `lib/tts.ts`), devuelve WAV. Sin terceros: el audio de referencia se manda de forma transitoria en cada narración (zero-shot, no hay clon persistente guardado en ningún servidor) — ver `poplicuentos-chatterbox-runpod/README.md` para el worker.
 
+### Marcas de pausa: normalizar antes de bifurcar
+
+El generador de cuentos mete marcas `(pausa)` en el texto, pero el modelo no siempre respeta la forma canónica: manda `(pausa breve)`, `[Pausa...]`, `—pausa—`. Cualquier variante que el worker no reconozca **la lee en voz alta** — y `(pausa)` narrado en rioplatense suena casi como "pará", que es como se reportó el bug.
+
+Por eso `cleanStoryText` arranca por `normalizePauseMarkers`, que lleva toda variante a `(pausa)`. Después cada camino hace lo suyo: RunPod recibe las marcas canónicas (el worker las convierte en silencio real) y OpenAI recibe `stripPauseMarkers`, que las cambia por puntos suspensivos más corte de párrafo — `gpt-4o-mini-tts` no tiene SSML ni forma de pedir un silencio.
+
+El mismo patrón vive en `PAUSE_MARKER_RE` (worker) y `NARRATION_CUE_PATTERN` (app). Si se toca uno, tocar los tres.
+
+### Instrucción de estilo para CosyVoice
+
+La instrucción es la única perilla de estilo que expone el modelo: el worker la pone antes del token `<|endofprompt|>` en el `prompt_text`, que es lo mismo que hace `inference_instruct2`. Sin esto el worker usa su default (`"You are a helpful assistant."`) y el modelo no recibe ninguna señal de qué idioma ni qué acento tiene que narrar — que es de dónde salía el acento extranjero.
+
+La arma `buildNarrationInstruction` (`lib/ttsInstruction.ts`) a partir del **locale completo** que manda la app, no de una constante. El texto base salió de un A/B a oído (`scripts/ab_instruction.mjs` en el repo del worker): ganó la instrucción escrita **en español** pidiendo rioplatense, por encima de la misma en inglés y de no mandar ninguna. Por eso cada idioma tiene su plantilla en su propio idioma.
+
+La región **se valida** contra el idioma antes de nombrarla. La región llega del dispositivo, o sea dice dónde vive el usuario, no qué variedad quiere escuchar: alguien en Argentina pidiendo un cuento en inglés manda `en-AR`, y nombrar ese país daría "Argentina English". Un par que no figura en `VARIANTS` cae a la instrucción sin mención de variedad — que además es lo más seguro contra el [issue #1790](https://github.com/FunAudioLLM/CosyVoice/issues/1790), donde una instrucción rara hace que el modelo ignore el idioma pedido.
+
+| Locale | Instrucción |
+|---|---|
+| `es-AR`, `es-UY` | español **rioplatense** (el ganador del A/B) |
+| `es-MX`, `es-ES`, … | español **de \<País\>**, con el nombre vía `Intl.DisplayNames` |
+| `en-US`, `en-GB`, … | **American** / **British** English (en inglés el adjetivo va antes) |
+| `en-AR`, `es-LATAM`, `es`, desconocido | sin mención de variedad |
+
+El prefijo `"You are a helpful assistant."` se mantiene a propósito y lo pone siempre el constructor: el handler documenta que es la combinación que se sabe que anda con Fun-CosyVoice3.
+
+`RUNPOD_TTS_INSTRUCTION` sigue existiendo, pero ahora es un **override**: si está seteada gana sobre el constructor, para iterar la redacción o volver a un comportamiento fijo sin deployar. `RUNPOD_TTS_INSTRUCTION=""` desactiva la instrucción por completo. Para probar redacciones a oído sin deployar: `node scripts/ab_instruction.mjs` en el repo del worker.
+
 ### Rutas disponibles
 
 | Ruta | Qué hace |
@@ -82,4 +109,6 @@ OPENAI_TTS_MODEL=gpt-4o-mini-tts   # opcional, tiene default
 RUNPOD_API_KEY=...                 # requerido para narrar con voces grabadas por la familia
 RUNPOD_ENDPOINT_ID=...             # endpoint desplegado desde poplicuentos-chatterbox-runpod
 RUNPOD_TTS_WAIT_MS=90000           # opcional, ventana sync de /runsync
+RUNPOD_TTS_INSTRUCTION=...         # opcional, PISA la instrucción que se arma por locale (ver la sección de TTS)
+RUNPOD_TTS_MAX_CHARS=300           # opcional, caracteres por chunk; subirlo da más continuidad de prosodia
 ```

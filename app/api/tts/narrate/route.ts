@@ -13,6 +13,7 @@ import {
   estimateDurationSeconds,
   resolveVoiceId,
   generateClonedSpeech,
+  stripPauseMarkers,
   RunPodJobError,
 } from "@/lib/tts";
 import OpenAI from "openai";
@@ -87,8 +88,11 @@ export async function POST(req: NextRequest) {
       }
       try {
         const referenceBuffer = Buffer.from(rawBody.reference_audio_b64, "base64");
+        // Va el locale COMPLETO, no solo el idioma: la region es la que decide la variedad que se
+        // le pide al modelo (rioplatense, mexicano, britanico...). Antes aca se hacia el split y
+        // la region se perdia, asi que todo el mundo recibia la instruccion fija en rioplatense.
         const buffer = await generateClonedSpeech(cleaned, referenceBuffer, {
-          languageId: (locale.split("-")[0] || "es").toLowerCase(),
+          locale,
         });
         return audioResponse(req, buffer, {
           storyId,
@@ -117,10 +121,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Este camino no tiene forma de pedir un silencio, asi que las marcas se cambian por
+    // puntos suspensivos ANTES de mandar el texto: si viajan tal cual, el modelo las lee
+    // en voz alta. El camino de RunPod (arriba) sigue mandando `cleaned` con las marcas,
+    // porque ahi el worker las convierte en silencio real.
     const speech = await openai.audio.speech.create({
       model: DEFAULT_TTS_MODEL,
       voice: voiceId as Parameters<typeof openai.audio.speech.create>[0]['voice'],
-      input: cleaned,
+      input: stripPauseMarkers(cleaned),
+      instructions:
+        "Narra este cuento infantil para dormir en español latinoamericano, con voz suave, " +
+        "calida y pausada. Haz pausas largas donde haya puntos suspensivos.",
       response_format: "mp3",
     });
     const buffer = Buffer.from(await speech.arrayBuffer());
