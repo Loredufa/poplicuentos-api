@@ -4,8 +4,8 @@ export const runtime = "nodejs";
 import { passwordResetCodes, users } from "@/db/schema";
 import { db } from "@/lib/db";
 import bcrypt from "bcryptjs";
-import { and, desc, eq, gt, isNull } from "drizzle-orm";
-import { NextRequest, NextResponse } from "next/server";
+import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { NextRequest } from "next/server";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 
 export function OPTIONS(req: Request) {
@@ -31,8 +31,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Buscar usuario
-    const [user] = await db.select().from(users).where(eq(users.email, email));
+    // Buscar usuario (lookup case-insensitive, igual que login y request-reset)
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(sql`lower(${users.email}) = ${email.trim().toLowerCase()}`)
+      .limit(1);
 
     if (!user) {
       return jsonWithCors(

@@ -1,15 +1,14 @@
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { validateRequest } from "@/lib/auth";
+import { requireAuth } from "@/lib/requireAuth";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 import { profiles, users } from "@/db/schema";
 
 export async function GET(req: Request) {
   try {
-    const { user } = await validateRequest(req);
-    if (!user) {
-      return jsonWithCors(req, { error: "Sesión inválida" }, { status: 401 });
-    }
+    const auth = await requireAuth(req);
+    if (!auth.ok) return auth.response;
+    const { user } = auth;
 
     const [record] = await db
       .select({

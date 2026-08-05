@@ -101,6 +101,40 @@ Genera 1-6 imágenes por cuento con OpenAI: primero arma un plan de arte + sinop
 - `app/api/story/` — generación de cuentos (OpenAI)
 - `lib/email-templates` — emails transaccionales
 
+## Migraciones: por qué no hay `db:migrate` ni `db:push`
+
+Los scripts disponibles son solo `npm run db:generate` y `npm run db:check`. La
+ausencia de los otros dos es deliberada:
+
+- **`drizzle-kit push`** introspecta la base viva y borra lo que no esté en
+  `db/schema.ts`. Ya pasó que hubiera tablas fuera del schema (`favorites`,
+  `story_narrations`); un `push` distraído se las habría llevado sin aviso.
+- **`drizzle-kit migrate`** replayearía `0000`/`0001`, que no usan
+  `IF NOT EXISTS` y revientan a mitad si se corren dos veces.
+
+**El flujo real es:** `npm run db:generate` → revisar el `.sql` → agregarle
+`IF NOT EXISTS` a mano → aplicarlo en el editor SQL de Neon. Editar el `.sql`
+generado no desincroniza nada, porque los snapshots de `drizzle/meta/` se
+computan desde `db/schema.ts`, no desde el SQL.
+
+Antes de aplicar cualquier migración, revisar que el SQL generado **solo** toque
+lo que se esperaba: si aparece un `DROP` o un `ALTER` sobre `users`, `sessions`,
+`profiles` o `password_reset_codes`, el snapshot no refleja la base y hay que
+parar.
+
+## Envío de correo — `lib/email.ts`
+
+Todo el correo del proyecto sale por `sendEmail()`. No usar `resend.emails.send()`
+directo: **devuelve `{ data, error }` y no lanza**, así que un `await` sin mirar
+`error` deja el fallo invisible —sin excepción, sin log, y la ruta respondiendo
+200—. Fue exactamente lo que pasó con los códigos de reseteo.
+
+El remitente sale de `RESEND_FROM`. Mientras apunte al default `resend.dev`
+(dominio compartido de pruebas de Resend), **solo llegan correos a la dirección
+dueña de la cuenta**; cualquier otro destinatario se rechaza con 403 y ni
+siquiera queda registrado en el dashboard. Para enviar a usuarios reales hay que
+verificar un dominio propio en Resend y setear `RESEND_FROM` en Vercel.
+
 ## Variables de entorno relevantes para TTS
 
 ```

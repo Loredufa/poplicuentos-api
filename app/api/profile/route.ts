@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { validateRequest } from "@/lib/auth";
+import { requireAuth } from "@/lib/requireAuth";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 import { profiles, users } from "@/db/schema";
 
@@ -21,10 +21,9 @@ export async function PUT(req: Request) {
   const respond = (body: unknown, init?: ResponseInit) =>
     jsonWithCors(req, body, init);
   try {
-    const { user } = await validateRequest(req);
-    if (!user) {
-      return respond({ error: "Sesión inválida" }, { status: 401 });
-    }
+    const auth = await requireAuth(req);
+    if (!auth.ok) return auth.response;
+    const { user } = auth;
 
     const patch = PatchSchema.parse(await req.json());
     const [current] = await db

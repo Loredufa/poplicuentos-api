@@ -1,11 +1,11 @@
-import { validateRequest } from "@/lib/auth";
+import { requireAuth } from "@/lib/requireAuth";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 import { db } from "@/lib/db";
+import { sendEmail } from "@/lib/email";
 import { getPasswordChangedEmail } from "@/lib/email-templates";
 import { users } from "@/db/schema";
 import { compare, hash } from "bcryptjs";
 import { eq } from "drizzle-orm";
-import { Resend } from "resend";
 import { z } from "zod";
 
 const Body = z.object({
@@ -20,10 +20,9 @@ export function OPTIONS(req: Request) {
 export async function POST(req: Request) {
     try {
         // 1. Validar sesión
-        const { user } = await validateRequest(req);
-        if (!user) {
-            return jsonWithCors(req, { error: "No autorizado" }, { status: 401 });
-        }
+        const auth = await requireAuth(req);
+        if (!auth.ok) return auth.response;
+        const { user } = auth;
 
         // 2. Validar body
         const body = Body.parse(await req.json());
@@ -51,17 +50,13 @@ export async function POST(req: Request) {
             .set({ hashed_password: newHashed })
             .where(eq(users.id, user.id));
 
-        // 5. Enviar email de notificación
-        const apiKey = process.env.RESEND_API_KEY;
-        if (apiKey) {
-            const resend = new Resend(apiKey);
-            await resend.emails.send({
-                from: "no-reply@resend.dev",
-                to: currentUser.email,
-                subject: "Tu contraseña ha sido cambiada",
-                html: getPasswordChangedEmail(),
-            });
-        }
+        // 5. Enviar email de notificación. Es informativo: si falla, queda
+        // logueado en sendEmail pero no se le niega el cambio al usuario.
+        await sendEmail({
+            to: currentUser.email,
+            subject: "Tu contraseña ha sido cambiada",
+            html: getPasswordChangedEmail(),
+        });
 
         return jsonWithCors(req, { ok: true, message: "Contraseña actualizada" });
     } catch (e: any) {

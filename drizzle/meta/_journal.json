@@ -29,6 +29,13 @@
       "when": 1762960000000,
       "tag": "0003_reset_codes",
       "breakpoints": false
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785940279468,
+      "tag": "0004_totp_2fa",
+      "breakpoints": true
     }
   ]
 }

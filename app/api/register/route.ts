@@ -1,9 +1,8 @@
-import { cookies } from "next/headers";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { hash } from "bcryptjs";
 import { db } from "@/lib/db";
-import { auth } from "@/lib/auth";
+import { issueSession } from "@/lib/session";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 import { profiles, users } from "@/db/schema";
 
@@ -25,10 +24,14 @@ export async function POST(req: Request) {
   try {
     const data = Body.parse(await req.json());
 
+    // Se normaliza en el backend y no solo en el cliente: es lo unico que
+    // garantiza que el chequeo de duplicados y el login coincidan.
+    const email = data.email.trim().toLowerCase();
+
     const existing = await db
       .select({ id: users.id })
       .from(users)
-      .where(eq(users.email, data.email))
+      .where(sql`lower(${users.email}) = ${email}`)
       .limit(1);
 
     if (existing.length > 0) {
@@ -38,7 +41,7 @@ export async function POST(req: Request) {
     const hashed = await hash(data.password, 12);
     const inserted = await db
       .insert(users)
-      .values({ email: data.email, hashed_password: hashed })
+      .values({ email, hashed_password: hashed })
       .returning({ id: users.id });
 
     const u = inserted[0];
@@ -48,7 +51,7 @@ export async function POST(req: Request) {
       first_name: data.first_name,
       last_name: data.last_name,
       display_name: `${data.first_name} ${data.last_name}`.trim(),
-      email: data.email,
+      email,
       country: data.country ?? "",
       phone: data.phone ?? "",
       language: data.language ?? "",
@@ -56,14 +59,12 @@ export async function POST(req: Request) {
     };
     await db.insert(profiles).values(profileRow);
 
-    const session = await auth.createSession(u.id, {});
-    const sessionCookie = auth.createSessionCookie(session.id);
-    const cookieStore = await cookies();
-    cookieStore.set(sessionCookie.name, sessionCookie.value, sessionCookie.attributes);
+    // Un usuario recien creado no tiene 2FA, asi que no hay corte que hacer.
+    const sesion = await issueSession(u.id);
 
     return jsonWithCors(
       req,
-      { ok: true, user_id: u.id, token: session.id },
+      { ok: true, user_id: u.id, token: sesion.token, user: sesion.user },
       { status: 201 }
     );
   } catch (e: unknown) {

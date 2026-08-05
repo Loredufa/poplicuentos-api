@@ -1,15 +1,14 @@
 import { cookies } from "next/headers";
-import { auth, validateRequest } from "@/lib/auth";
+import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/requireAuth";
 import { jsonWithCors, optionsResponse } from "@/lib/cors";
 
 export async function POST(req: Request) {
   try {
-    const { session } = await validateRequest(req);
-    if (!session) {
-      return jsonWithCors(req, { error: "Sesión inválida" }, { status: 401 });
-    }
+    const authResult = await requireAuth(req);
+    if (!authResult.ok) return authResult.response;
 
-    await auth.invalidateSession(session.id);
+    await auth.invalidateSession(authResult.session.id);
     const blank = auth.createBlankSessionCookie();
     const cookieStore = await cookies();
     cookieStore.set(blank.name, blank.value, blank.attributes);
