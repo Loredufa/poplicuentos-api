@@ -20,6 +20,71 @@ type SendEmailInput = {
   html: string;
 };
 
+export type Transporte = "resend" | "console";
+
+/**
+ * Elige el transporte. Funcion pura para poder testear la unica regla que
+ * importa: que "console" NUNCA pueda activarse en un servidor desplegado.
+ *
+ * El transporte de consola imprime el contenido del mail en la terminal en vez
+ * de enviarlo. En desarrollo es lo que se quiere: lo que hace falta es el
+ * codigo de 6 digitos, no el correo, y esperar a la bandeja de entrada hace el
+ * loop tres veces mas lento. Pero si se colara en un deploy, ningun usuario
+ * recibiria su codigo Y quedaria escrito en los logs del servidor.
+ *
+ * Se miran DOS señales y alcanza con una:
+ *
+ *  - `VERCEL_ENV`: la setea Vercel sola en cada deploy y no se puede pisar
+ *    desde el panel. Es la señal confiable.
+ *  - `NODE_ENV`: sirve fuera de Vercel, pero SI se puede pisar a mano en el
+ *    panel de variables. Confiar solo en ella deja la puerta abierta a que un
+ *    `NODE_ENV=development` cargado por error silencie todo el correo de
+ *    produccion.
+ */
+export function elegirTransporte(
+  pedido: string | undefined,
+  nodeEnv: string | undefined,
+  vercelEnv?: string | undefined
+): Transporte {
+  if (pedido !== "console") return "resend";
+
+  // Misma regla que lib/entorno.ts, pero con los valores inyectados para poder
+  // testearla sin tocar process.env.
+  const enDeploy = Boolean(vercelEnv) || nodeEnv === "production";
+
+  if (enDeploy) {
+    console.error(
+      "[email] EMAIL_TRANSPORT=console IGNORADO: esto es un deploy y el correo se envia de verdad.",
+      { nodeEnv, vercelEnv },
+      "Sacá EMAIL_TRANSPORT de las variables de entorno: es solo para desarrollo local."
+    );
+    return "resend";
+  }
+
+  return "console";
+}
+
+/** Imprime el mail en la terminal en lugar de enviarlo. Solo fuera de produccion. */
+function enviarPorConsola({ to, subject, html }: SendEmailInput): SendEmailResult {
+  // El codigo de reseteo es lo unico que se necesita del mail en desarrollo,
+  // asi que se extrae y se muestra aparte para no tener que leer el HTML.
+  const codigo = html.match(/>\s*(\d{6})\s*</)?.[1];
+
+  console.log(
+    [
+      "",
+      "┌─ [email] TRANSPORTE DE CONSOLA — no se envio nada ─",
+      `│ para:    ${to}`,
+      `│ asunto:  ${subject}`,
+      ...(codigo ? [`│ CODIGO:  ${codigo}`] : []),
+      "└───────────────────────────────────────────────────",
+      "",
+    ].join("\n")
+  );
+
+  return { ok: true };
+}
+
 /**
  * Unico punto de envio de correo del proyecto.
  *
@@ -34,6 +99,15 @@ export async function sendEmail({
   subject,
   html,
 }: SendEmailInput): Promise<SendEmailResult> {
+  const transporte = elegirTransporte(
+    process.env.EMAIL_TRANSPORT,
+    process.env.NODE_ENV,
+    process.env.VERCEL_ENV
+  );
+  if (transporte === "console") {
+    return enviarPorConsola({ to, subject, html });
+  }
+
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     const error = "RESEND_API_KEY no esta definida";

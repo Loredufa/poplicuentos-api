@@ -135,6 +135,28 @@ dueña de la cuenta**; cualquier otro destinatario se rechaza con 403 y ni
 siquiera queda registrado en el dashboard. Para enviar a usuarios reales hay que
 verificar un dominio propio en Resend y setear `RESEND_FROM` en Vercel.
 
+### Desarrollo: `EMAIL_TRANSPORT=console`
+
+En `.env.local`, `EMAIL_TRANSPORT=console` imprime el correo en la terminal en
+vez de enviarlo, y extrae el código de 6 dígitos para no tener que leer el HTML:
+
+```
+┌─ [email] TRANSPORTE DE CONSOLA — no se envio nada ─
+│ para:    ana@ejemplo.com
+│ asunto:  Código para resetear tu contraseña
+│ CODIGO:  483927
+└───────────────────────────────────────────────────
+```
+
+Evita depender de la bandeja de entrada y del límite de `resend.dev` mientras se
+desarrolla. **Se ignora si `NODE_ENV=production`** (con un `console.error`): si
+se colara en producción, ningún usuario recibiría su código y además quedaría
+escrito en los logs del servidor.
+
+No se usa Gmail vía SMTP a propósito: obligaría a mantener dos transportes con
+comportamientos distintos, y los bugs del camino real no aparecerían en
+desarrollo.
+
 ## Variables de entorno relevantes para TTS
 
 ```

@@ -3,6 +3,7 @@ import { DrizzlePostgreSQLAdapter } from "@lucia-auth/adapter-drizzle";
 import { Lucia } from "lucia";
 import { sessions, users } from "../db/schema";
 import { db } from "../lib/db";
+import { esDeploy } from "./entorno";
 
 export const auth = new Lucia(
   new DrizzlePostgreSQLAdapter(db, sessions, users),
@@ -11,7 +12,10 @@ export const auth = new Lucia(
       name: process.env.AUTH_COOKIE_NAME || "auth_session",
       attributes: {
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        // esDeploy() y no NODE_ENV a secas: NODE_ENV se puede pisar a mano en
+        // el panel de Vercel, y un "development" cargado por error dejaria la
+        // cookie de sesion viajando sin el flag Secure, o sea por HTTP plano.
+        secure: esDeploy(),
         path: "/",
         // httpOnly es implícito en Lucia v3 (no se configura)
       },
